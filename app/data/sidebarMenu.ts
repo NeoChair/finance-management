@@ -60,36 +60,36 @@ export const sidebarMenu: SidebarMenuItem[] = [
     //     "text": "사용자 관리",
     //     "text_en": "User Management"
     // },
-    {
-        "is_divider": true
-    },
+    // {
+    //     "is_divider": true
+    // },
     // {
     //     "controller": "Settings",
     //     "icon": "fa-solid fa-gear",
     //     "text": "설정",
     //     "text_en": "Settings",
     //     "children": [
-    //         {
-    //             "action": "WarehouseMng",
-    //             "page": "/Settings/Warehouse/",
-    //             "icon": "fa-solid fa-warehouse",
-    //             "text": "창고 관리",
-    //             "text_en": "Warehouse Management"
-    //         },
-    //         {
-    //             "action": "EnterpriseMng",
-    //             "page": "/Settings/Enterprise/",
-    //             "icon": "fa-solid fa-building",
-    //             "text": "기업 관리",
-    //             "text_en": "Enterprise Management"
-    //         },
-    //         {
-    //             "action": "CommonCodeMng",
-    //             "page": "/Settings/CommonCode/",
-    //             "icon": "fa-solid fa-tags",
-    //             "text": "공통 코드 관리",
-    //             "text_en": "Common Code Management"
-    //         }
-    //     ]
-    // },
+            // {
+            //     "action": "WarehouseMng",
+            //     "page": "/Settings/Warehouse/",
+            //     "icon": "fa-solid fa-warehouse",
+            //     "text": "창고 관리",
+            //     "text_en": "Warehouse Management"
+            // },
+            // {
+            //     "action": "EnterpriseMng",
+            //     "page": "/Settings/Enterprise/",
+            //     "icon": "fa-solid fa-building",
+            //     "text": "기업 관리",
+            //     "text_en": "Enterprise Management"
+            // },
+            // {
+            //     "action": "CommonCodeMng",
+            //     "page": "/Settings/CommonCode/",
+            //     "icon": "fa-solid fa-tags",
+            //     "text": "공통 코드 관리",
+            //     "text_en": "Common Code Management"
+            // }
+      //  ]
+    //},
 ];

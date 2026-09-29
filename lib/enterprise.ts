@@ -4,6 +4,9 @@ export type Enterprise = {
   etpCd: string;
   etpNm: string | null;
   loclNatnCd: string | null;
+  /** "Y" | "N" — IS_USE is a bit; kept as text so the generic CRUD table can edit it. */
+  isUse: "Y" | "N";
+  remk: string | null;
 };
 
 const OWNR_ETP_CD = "KR-DT-HG";
@@ -15,7 +18,7 @@ export async function getEnterprises(): Promise<Enterprise[]> {
     .request()
     .input("ownrEtpCd", sql.VarChar(30), OWNR_ETP_CD)
     .query(
-      `SELECT ETP_CD, ETP_NM, LOCL_NATN_CD
+      `SELECT ETP_CD, ETP_NM, LOCL_NATN_CD, IS_USE, REMK
        FROM BC.TB_ETP_MST
        WHERE OWNR_ETP_CD = @ownrEtpCd
        ORDER BY ETP_CD`
@@ -24,6 +27,8 @@ export async function getEnterprises(): Promise<Enterprise[]> {
     etpCd: r.ETP_CD,
     etpNm: r.ETP_NM,
     loclNatnCd: r.LOCL_NATN_CD,
+    isUse: r.IS_USE ? "Y" : "N",
+    remk: r.REMK,
   }));
 }
 
@@ -45,23 +50,27 @@ export async function createEnterprise(etpCd: string): Promise<void> {
 
 // Field names are whitelisted below and mapped to fixed column names — never built from
 // client-supplied strings — so this stays safe from SQL injection despite the dynamic SQL text.
-const ETP_FIELD_COLUMNS: Record<string, string> = {
-  etpCd: "ETP_CD",
-  etpNm: "ETP_NM",
-  loclNatnCd: "LOCL_NATN_CD",
+const ETP_FIELD_COLUMNS: Record<string, { column: string; type: sql.ISqlType | (() => sql.ISqlType) }> = {
+  etpCd: { column: "ETP_CD", type: sql.VarChar(30) },
+  etpNm: { column: "ETP_NM", type: sql.NVarChar(127) },
+  loclNatnCd: { column: "LOCL_NATN_CD", type: sql.VarChar(12) },
+  isUse: { column: "IS_USE", type: sql.Bit },
+  remk: { column: "REMK", type: sql.NVarChar(sql.MAX) },
 };
 
 export async function updateEnterpriseField(etpCd: string, field: string, value: string | null): Promise<void> {
-  const column = ETP_FIELD_COLUMNS[field];
-  if (!column) throw new Error(`Unknown enterprise field: ${field}`);
+  const spec = ETP_FIELD_COLUMNS[field];
+  if (!spec) throw new Error(`Unknown enterprise field: ${field}`);
+  // IS_USE is NOT NULL: anything but an explicit "N" means in use.
+  const dbValue = field === "isUse" ? value !== "N" : value;
   const pool = await getPool();
   await pool
     .request()
     .input("ownrEtpCd", sql.VarChar(30), OWNR_ETP_CD)
     .input("etpCd", sql.VarChar(30), etpCd)
-    .input("value", sql.NVarChar(200), value)
+    .input("value", spec.type, dbValue)
     .input("mdfrId", sql.VarChar(30), REGR_ID)
-    .query(`UPDATE BC.TB_ETP_MST SET ${column} = @value, MDFR_ID = @mdfrId, MDFY_DT = GETDATE() WHERE OWNR_ETP_CD = @ownrEtpCd AND ETP_CD = @etpCd`);
+    .query(`UPDATE BC.TB_ETP_MST SET ${spec.column} = @value, MDFR_ID = @mdfrId, MDFY_DT = GETDATE() WHERE OWNR_ETP_CD = @ownrEtpCd AND ETP_CD = @etpCd`);
 }
 
 export async function deleteEnterprise(etpCd: string): Promise<void> {

@@ -16,14 +16,16 @@ function parseFieldEdit(body: unknown): FieldEdit | null {
   if (b.kind === "master" && typeof b.field === "string" && MASTER_FIELDS.has(b.field)) {
     return { kind: "master", field: b.field as FieldEdit extends { kind: "master"; field: infer F } ? F : never, value: (b.value as string | number | null) ?? null };
   }
-  if (b.kind === "detail" && (b.field === "qty" || b.field === "amt")) {
-    return { kind: "detail", field: b.field, value: b.value == null ? null : Number(b.value) };
-  }
+  // field absent → the amount (numeric); sndrNm/rcvrNm → a party name (text).
+  if (b.field !== undefined && b.field !== "sndrNm" && b.field !== "rcvrNm") return null;
+  const field = b.field as "sndrNm" | "rcvrNm" | undefined;
+  const value = b.value == null || b.value === "" ? null : field ? String(b.value) : Number(b.value);
+
   if (b.kind === "party" && (b.invTpCd === "NEO" || b.invTpCd === "FACTORY")) {
-    return { kind: "party", invTpCd: b.invTpCd, value: b.value == null ? null : Number(b.value) };
+    return { kind: "party", invTpCd: b.invTpCd, field, value };
   }
   if (b.kind === "cost" && typeof b.costTpCd === "string") {
-    return { kind: "cost", costTpCd: b.costTpCd, value: b.value == null ? null : Number(b.value) };
+    return { kind: "cost", costTpCd: b.costTpCd, field, value };
   }
   return null;
 }

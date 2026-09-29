@@ -2,7 +2,21 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-export type CrudColumn = { key: string; label: string };
+export type CrudOption = { value: string; label: string };
+
+/**
+ * width: fixed column width (e.g. "160px"); columns without one share the remaining space.
+ * options: edit with a dropdown — either a fixed list, or loaded from a URL returning `{ rows }`
+ * (e.g. a common-code group) mapped through valueKey/labelKey. Cells show the option's label.
+ */
+export type CrudColumn = {
+  key: string;
+  label: string;
+  width?: string;
+  options?: CrudOption[] | { url: string; valueKey: string; labelKey: string };
+  /** Dropdown only: offer a blank "(없음)" choice (default true). */
+  allowEmpty?: boolean;
+};
 
 type Row = Record<string, string | null>;
 
@@ -13,6 +27,10 @@ const thBorder = { borderRight: "1px solid #9ca3af", borderBottom: "1px solid #9
 const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted #9ca3af" };
 const inlineEditCls = "w-full min-w-[60px] border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none";
 const inlineEditShadow = { boxShadow: "inset 0 -2px 0 0 #ff4b4b" };
+// Dropdowns read larger than the 13px grid text (the option list especially) — 15px, with a
+// fixed line box so the row still doesn't change height while the select is open.
+const selectEditCls =
+  "w-full min-w-[150px] h-5 border-0 bg-transparent p-0 text-[15px] leading-5 text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
 const pendingDot = <span className="mr-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 align-middle" />;
 
 type EditingCell = { id: string; key: string };
@@ -37,6 +55,28 @@ export default function SimpleCrudTable({
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
   const [draft, setDraft] = useState("");
   const [pendingEdits, setPendingEdits] = useState<Record<string, PendingEdit>>({});
+  const [loadedOptions, setLoadedOptions] = useState<Record<string, CrudOption[]>>({});
+
+  useEffect(() => {
+    for (const c of columns) {
+      const src = c.options;
+      if (!src || Array.isArray(src)) continue;
+      fetch(src.url)
+        .then((res) => (res.ok ? res.json() : { rows: [] }))
+        .then((data: { rows?: Record<string, string>[] }) =>
+          setLoadedOptions((prev) => ({
+            ...prev,
+            [c.key]: (data.rows ?? []).map((r) => ({ value: r[src.valueKey], label: r[src.labelKey] || r[src.valueKey] })),
+          }))
+        )
+        .catch(() => {});
+    }
+  }, [columns]);
+
+  function optionsFor(c: CrudColumn): CrudOption[] | null {
+    if (!c.options) return null;
+    return Array.isArray(c.options) ? c.options : (loadedOptions[c.key] ?? []);
+  }
 
   const load = useCallback(() => {
     return fetch(apiUrl)
@@ -64,11 +104,12 @@ export default function SimpleCrudTable({
     setDraft(getEffectiveValue(row, key));
   }
 
-  function commitEdit(row: Row) {
+  // `picked` comes from a dropdown, which commits on change rather than on blur.
+  function commitEdit(row: Row, picked?: string) {
     if (!editingCell) return;
     const { id, key } = editingCell;
     setEditingCell(null);
-    setPendingEdits((prev) => ({ ...prev, [`${id}:${key}`]: { id, key, value: draft } }));
+    setPendingEdits((prev) => ({ ...prev, [`${id}:${key}`]: { id, key, value: picked ?? draft } }));
   }
 
   async function handleAddRow() {
@@ -193,14 +234,14 @@ export default function SimpleCrudTable({
 
       {rows && (
         <div className="hover-scroll overflow-auto px-2" style={{ maxHeight: "calc(100vh - 280px)" }}>
-          <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: "13px" }}>
+          <table className="w-full" style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: "13px" }}>
             <thead>
               <tr>
-                <th className={thBase} style={thBorder}>
+                <th className={thBase} style={{ ...thBorder, width: "44px" }}>
                   <input type="checkbox" className={checkboxCls} checked={allSelected} onChange={toggleSelectAll} />
                 </th>
                 {columns.map((c) => (
-                  <th key={c.key} className={thBase} style={thBorder}>
+                  <th key={c.key} className={thBase} style={{ ...thBorder, width: c.width }}>
                     {c.label}
                   </th>
                 ))}
@@ -217,6 +258,32 @@ export default function SimpleCrudTable({
                     {columns.map((c) => {
                       const isEditing = editingCell?.id === id && editingCell?.key === c.key;
                       const isPending = `${id}:${c.key}` in pendingEdits;
+                      const opts = optionsFor(c);
+                      if (isEditing && opts) {
+                        const known = !draft || opts.some((o) => o.value === draft);
+                        return (
+                          <td key={c.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
+                            <select
+                              autoFocus
+                              value={draft}
+                              onChange={(e) => commitEdit(row, e.target.value)}
+                              onBlur={() => setEditingCell(null)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Escape") setEditingCell(null);
+                              }}
+                              className={selectEditCls}
+                            >
+                              {c.allowEmpty !== false && <option value="">(없음)</option>}
+                              {!known && <option value={draft}>{draft}</option>}
+                              {opts.map((o) => (
+                                <option key={o.value} value={o.value}>
+                                  {o.label}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                        );
+                      }
                       if (isEditing) {
                         return (
                           <td key={c.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
@@ -242,7 +309,10 @@ export default function SimpleCrudTable({
                           onClick={() => startEdit(row, c.key)}
                         >
                           {isPending && pendingDot}
-                          {getEffectiveValue(row, c.key)}
+                          {(() => {
+                            const v = getEffectiveValue(row, c.key);
+                            return opts?.find((o) => o.value === v)?.label ?? v;
+                          })()}
                         </td>
                       );
                     })}

@@ -1,9 +1,9 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import ExcelJS from "exceljs";
 import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
-import { getInvoiceSections, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
+import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
 
 function formatDate(v: string | null): string {
   if (!v || v.length !== 8) return "";
@@ -21,7 +21,7 @@ function formatCell(col: InvoiceColumn, value: string | number | null): string {
 function isNumericEdit(col: InvoiceColumn): boolean {
   if (!col.editTarget) return false;
   if (col.editTarget.kind === "master") return col.editTarget.field === "usdExchRt";
-  return true; // detail/party/cost targets are always amount or qty
+  return !col.editTarget.field; // party/cost: the amount unless a name field is targeted
 }
 
 const HEADER_ROW_H = 36;
@@ -45,6 +45,10 @@ const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted 
 // jumps in height the moment you click into it.
 const inlineEditCls = "w-full min-w-[60px] border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none";
 const inlineEditShadow = { boxShadow: "inset 0 -2px 0 0 #ff4b4b" };
+// Dropdowns read larger than the 13px grid text (the option list especially) — 15px, with a
+// fixed line box so the row still doesn't change height while the select is open.
+const selectEditCls =
+  "w-full min-w-[150px] h-5 border-0 bg-transparent p-0 text-[15px] leading-5 text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
 
 type EditingCell = { shpmId: number; colKey: string };
 type SkuField = "skuCd" | "qty" | "unitPrc" | "amt";
@@ -57,6 +61,7 @@ function formatSkuAmt(v: number | null): string {
 }
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const MANUAL_ENTRY = "__manual__";
 
 export default function InvoiceTable({
   apiUrl,
@@ -83,6 +88,25 @@ export default function InvoiceTable({
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc" | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  // Dropdown values for the Shipper/Sender/Receiver/Buyer/Seller columns: whatever is already
+  // stored in that same DB column (see getPartyOptions), keyed by optionKey(editTarget).
+  const [partyOptions, setPartyOptions] = useState<Record<string, string[]>>({});
+  // The select's "직접 입력" choice swaps the cell to a plain text input for a new name.
+  const [manualEntry, setManualEntry] = useState(false);
+  // Mirrors manualEntry synchronously: the select's blur can fire in the same tick it's swapped
+  // out for the text input, before the state update is visible to that handler.
+  const manualEntryRef = useRef(false);
+
+  const loadPartyOptions = useCallback(() => {
+    fetch("/api/invoice/options")
+      .then((res) => (res.ok ? res.json() : { options: {} }))
+      .then((data) => setPartyOptions(data.options ?? {}))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadPartyOptions();
+  }, [loadPartyOptions]);
 
   function toggleExpanded(shpmId: number) {
     setExpanded((prev) => {
@@ -123,18 +147,23 @@ export default function InvoiceTable({
 
   function startEdit(col: InvoiceColumn, row: InvoiceRow) {
     if (!col.editTarget) return;
+    manualEntryRef.current = false;
+    setManualEntry(false);
     setEditingCell({ shpmId: row.shpmId, colKey: col.key });
     const raw = getEffectiveValue(col, row);
     setDraft(col.format === "date" ? formatDate(raw as string | null) : raw == null ? "" : String(raw));
   }
 
-  function commitEdit(col: InvoiceColumn, row: InvoiceRow) {
+  // `picked` is passed by the dropdown, which commits on change rather than on blur.
+  function commitEdit(col: InvoiceColumn, row: InvoiceRow, picked?: string) {
     const target = col.editTarget;
     setEditingCell(null);
     if (!target) return;
 
     let value: string | number | null;
-    if (col.format === "date") {
+    if (picked !== undefined) {
+      value = picked === "" ? null : picked;
+    } else if (col.format === "date") {
       value = draft ? draft.replaceAll("-", "") : null;
     } else if (isNumericEdit(col)) {
       value = draft === "" ? null : Number(draft);
@@ -154,7 +183,7 @@ export default function InvoiceTable({
       suplFactNm: null, sttsNm: null, loadType: null, hblNo: null, mblNo: null,
       contNo: `NEW-${Date.now()}`,
       poNo: null, subpoNo: null, podNm: null, etd: null, eta: null, wrhsArrvDe: null,
-      usdExchRt: null, currCd: "USD", rmrk: null, qty: null, amt: null,
+      usdExchRt: null, invNo: null, invDe: null, currCd: "USD", rmrk: null,
     };
     setSaving(true);
     try {
@@ -237,11 +266,9 @@ export default function InvoiceTable({
         const body =
           target.kind === "master"
             ? { kind: "master", field: target.field, value: e.value }
-            : target.kind === "detail"
-              ? { kind: "detail", field: target.field, value: e.value }
-              : target.kind === "party"
-                ? { kind: "party", invTpCd: target.invTpCd, value: e.value }
-                : { kind: "cost", costTpCd: target.costTpCd, value: e.value };
+            : target.kind === "party"
+              ? { kind: "party", invTpCd: target.invTpCd, field: target.field, value: e.value }
+              : { kind: "cost", costTpCd: target.costTpCd, field: target.field, value: e.value };
         return fetch(`${apiUrl}/${e.shpmId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -261,6 +288,7 @@ export default function InvoiceTable({
       setPendingCellEdits({});
       setPendingSkuEdits({});
       await load();
+      loadPartyOptions(); // a newly typed name becomes a choice from now on
     } finally {
       setSaving(false);
     }
@@ -417,6 +445,45 @@ export default function InvoiceTable({
     const isEditing = editingCell?.shpmId === row.shpmId && editingCell?.colKey === col.key;
     const isPending = `${row.shpmId}:${col.key}` in pendingCellEdits;
     const cellCls = `${tdBase} ${col.align === "right" ? "text-right" : ""} ${col.editTarget ? "cursor-pointer hover:bg-gray-50" : ""}`;
+
+    if (isEditing && col.select === "used" && col.editTarget && !manualEntry) {
+      const opts = partyOptions[optionKey(col.editTarget)] ?? [];
+      // Keep the current value selectable even if it's no longer used anywhere else.
+      const hasCurrent = !draft || opts.includes(draft);
+      return (
+        <td key={col.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
+          <select
+            autoFocus
+            value={draft}
+            onChange={(e) => {
+              if (e.target.value === MANUAL_ENTRY) {
+                manualEntryRef.current = true;
+                setManualEntry(true);
+                setDraft("");
+              } else {
+                commitEdit(col, row, e.target.value);
+              }
+            }}
+            onBlur={() => {
+              if (!manualEntryRef.current) setEditingCell(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setEditingCell(null);
+            }}
+            className={selectEditCls}
+          >
+            <option value="">(없음)</option>
+            {!hasCurrent && <option value={draft}>{draft}</option>}
+            {opts.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+            <option value={MANUAL_ENTRY}>✎ 직접 입력…</option>
+          </select>
+        </td>
+      );
+    }
 
     if (isEditing) {
       return (

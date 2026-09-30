@@ -316,14 +316,20 @@ const MASTER_FIELD_COLUMNS: Record<string, string> = {
 };
 
 /** Which column of an invoice/cost line a party/cost edit targets; absent = the amount. */
-export type PartyField = "sndrNm" | "rcvrNm";
+export type PartyField = "sndrNm" | "rcvrNm" | "invNo" | "invDe" | "payDe";
 
 export type FieldEdit =
   | { kind: "master"; field: keyof typeof MASTER_FIELD_COLUMNS; value: string | number | null }
   | { kind: "party"; invTpCd: "NEO" | "FACTORY"; field?: PartyField; value: string | number | null }
   | { kind: "cost"; costTpCd: string; field?: PartyField; value: string | number | null };
 
-const PARTY_FIELD_COLUMNS: Record<PartyField, string> = { sndrNm: "SNDR_NM", rcvrNm: "RCVR_NM" };
+const PARTY_FIELD_COLUMNS: Record<PartyField, string> = {
+  sndrNm: "SNDR_NM",
+  rcvrNm: "RCVR_NM",
+  invNo: "INV_NO",
+  invDe: "INV_DE",
+  payDe: "PAY_DE",
+};
 
 export async function applyFieldEdit(shpmId: number, edit: FieldEdit): Promise<void> {
   const pool = await getPool();
@@ -448,4 +454,174 @@ export async function updateSkuField(shpmDtlId: number, edit: SkuFieldEdit): Pro
 export async function deleteSku(shpmDtlId: number): Promise<void> {
   const pool = await getPool();
   await pool.request().input("id", sql.Int, shpmDtlId).query("DELETE FROM FM.TB_SHPM_DTL WHERE SHPM_DTL_ID = @id AND INV_TP_CD = 'NEO'");
+}
+
+// ---- Excel upload (bulk upsert of shipment rows; SKU detail is not part of the upload) ----
+
+export type LegField = PartyField | "amt";
+export type LegValues = Partial<Record<LegField, string | number>>;
+
+/** One Excel-upload row, already validated and grouped by target table. Only the cells that
+ *  were filled in are present — blank cells never overwrite existing values. */
+export type ShipmentImport = {
+  rowNo: number;
+  master: Record<string, string | number>;
+  parties: { invTpCd: "NEO" | "FACTORY"; values: LegValues }[];
+  costs: { costTpCd: string; values: LegValues }[];
+};
+
+const LEG_FIELD_TYPES: Record<LegField, sql.ISqlType> = {
+  amt: sql.Decimal(18, 4),
+  sndrNm: sql.NVarChar(50),
+  rcvrNm: sql.NVarChar(50),
+  invNo: sql.VarChar(50),
+  invDe: sql.VarChar(8),
+  payDe: sql.VarChar(8),
+};
+
+function legColumn(f: LegField): string {
+  return f === "amt" ? "AMT" : PARTY_FIELD_COLUMNS[f];
+}
+
+/** A failure tied to one uploaded row; rowNo is the Excel row number. */
+export class ImportRowError extends Error {
+  constructor(public rowNo: number, message: string) {
+    super(message);
+  }
+}
+
+function normKey(v: string | number | null | undefined): string | null {
+  if (v == null) return null;
+  const s = String(v).trim().toUpperCase();
+  return s === "" ? null : s;
+}
+
+// SHPM_ID is an IDENTITY column, so the upload file never carries it. An uploaded row is tied
+// to an existing shipment by container number, narrowed by H-BL/M-BL when the file has them —
+// the same columns as the UQ_TB_SHPM_MST_BL unique key. No match = a new shipment.
+async function findShipmentForImport(tx: sql.Transaction, prdLineCd: string, s: ShipmentImport): Promise<number | null> {
+  const result = await new sql.Request(tx)
+    .input("contNo", sql.VarChar(30), String(s.master.contNo))
+    .query("SELECT SHPM_ID, PRD_LINE_CD, HBL_NO, MBL_NO FROM FM.TB_SHPM_MST WHERE CONT_NO = @contNo");
+
+  const hbl = normKey(s.master.hblNo);
+  const mbl = normKey(s.master.mblNo);
+  const compatible = result.recordset.filter((r) => {
+    const rHbl = normKey(r.HBL_NO);
+    const rMbl = normKey(r.MBL_NO);
+    return (hbl == null || rHbl == null || rHbl === hbl) && (mbl == null || rMbl == null || rMbl === mbl);
+  });
+  const exact = compatible.find((r) => normKey(r.HBL_NO) === hbl && normKey(r.MBL_NO) === mbl);
+  const sameLine = compatible.filter((r) => r.PRD_LINE_CD === prdLineCd);
+  const match = exact ?? (sameLine.length === 1 ? sameLine[0] : undefined);
+
+  if (!match) {
+    if (sameLine.length > 1) throw new ImportRowError(s.rowNo, "같은 컨테이너가 여러 건 있습니다. H-BL/M-BL을 입력해 구분해 주세요.");
+    return null;
+  }
+  if (match.PRD_LINE_CD !== prdLineCd) {
+    throw new ImportRowError(s.rowNo, `다른 제품군(${match.PRD_LINE_CD})에 이미 등록된 B/L·컨테이너입니다.`);
+  }
+  return match.SHPM_ID as number;
+}
+
+function bindMasterFields(req: sql.Request, master: Record<string, string | number>): { column: string; param: string }[] {
+  return Object.entries(master).map(([field, value]) => {
+    const column = MASTER_FIELD_COLUMNS[field];
+    if (!column) throw new Error(`Unknown master field: ${field}`);
+    req.input(field, sql.NVarChar(500), String(value));
+    return { column, param: `@${field}` };
+  });
+}
+
+async function upsertLeg(
+  tx: sql.Transaction,
+  table: "FM.TB_INV_MST" | "FM.TB_SHPM_COST_DTL",
+  typeColumn: "INV_TP_CD" | "COST_TP_CD",
+  shpmId: number,
+  typeCd: string,
+  values: LegValues
+): Promise<void> {
+  const fields = Object.keys(values) as LegField[];
+  if (fields.length === 0) return;
+  const req = new sql.Request(tx)
+    .input("shpmId", sql.Int, shpmId)
+    .input("typeCd", sql.VarChar(30), typeCd)
+    .input("userId", sql.VarChar(30), REGR_ID);
+  for (const f of fields) req.input(f, LEG_FIELD_TYPES[f], values[f]);
+  await req.query(
+    `UPDATE ${table} SET ${fields.map((f) => `${legColumn(f)} = @${f}`).join(", ")},
+            MDFR_ID = @userId, MDFY_DT = GETDATE()
+     WHERE SHPM_ID = @shpmId AND ${typeColumn} = @typeCd;
+     IF @@ROWCOUNT = 0
+       INSERT INTO ${table} (SHPM_ID, ${typeColumn}, CURR_CD, REGR_ID, ${fields.map(legColumn).join(", ")})
+       VALUES (@shpmId, @typeCd, 'USD', @userId, ${fields.map((f) => `@${f}`).join(", ")})`
+  );
+}
+
+async function importOne(tx: sql.Transaction, prdLineCd: string, ownrEtpCd: string, s: ShipmentImport): Promise<{ shpmId: number; created: boolean }> {
+  let shpmId = await findShipmentForImport(tx, prdLineCd, s);
+  const created = shpmId == null;
+
+  if (shpmId == null) {
+    const req = new sql.Request(tx)
+      .input("ownrEtpCd", sql.VarChar(20), ownrEtpCd)
+      .input("prdLineCd", sql.VarChar(20), prdLineCd)
+      .input("regrId", sql.VarChar(30), REGR_ID);
+    const bound = bindMasterFields(req, { currCd: "USD", ...s.master });
+    const result = await req.query(
+      `INSERT INTO FM.TB_SHPM_MST (OWNR_ETP_CD, PRD_LINE_CD, REGR_ID, ${bound.map((b) => b.column).join(", ")})
+       OUTPUT INSERTED.SHPM_ID
+       VALUES (@ownrEtpCd, @prdLineCd, @regrId, ${bound.map((b) => b.param).join(", ")})`
+    );
+    shpmId = result.recordset[0].SHPM_ID as number;
+  } else {
+    const req = new sql.Request(tx).input("shpmId", sql.Int, shpmId).input("mdfrId", sql.VarChar(30), REGR_ID);
+    const bound = bindMasterFields(req, s.master);
+    await req.query(
+      `UPDATE FM.TB_SHPM_MST SET ${bound.map((b) => `${b.column} = ${b.param}`).join(", ")},
+              MDFR_ID = @mdfrId, MDFY_DT = GETDATE()
+       WHERE SHPM_ID = @shpmId`
+    );
+  }
+
+  for (const p of s.parties) await upsertLeg(tx, "FM.TB_INV_MST", "INV_TP_CD", shpmId, p.invTpCd, p.values);
+  for (const c of s.costs) await upsertLeg(tx, "FM.TB_SHPM_COST_DTL", "COST_TP_CD", shpmId, c.costTpCd, c.values);
+
+  return { shpmId, created };
+}
+
+/** All-or-nothing: any failing row rolls the whole upload back and surfaces as ImportRowError. */
+export async function importShipments(
+  prdLineCd: string,
+  ownrEtpCd: string,
+  imports: ShipmentImport[]
+): Promise<{ inserted: number; updated: number }> {
+  const pool = await getPool();
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+
+  let inserted = 0;
+  let updated = 0;
+  const seen = new Map<number, number>(); // SHPM_ID -> Excel row that already wrote to it
+  try {
+    for (const s of imports) {
+      try {
+        const { shpmId, created } = await importOne(tx, prdLineCd, ownrEtpCd, s);
+        const prevRow = seen.get(shpmId);
+        if (prevRow != null) throw new ImportRowError(s.rowNo, `${prevRow}행과 같은 건으로 인식됩니다. 중복 행을 확인해 주세요.`);
+        seen.set(shpmId, s.rowNo);
+        if (created) inserted++;
+        else updated++;
+      } catch (err) {
+        if (err instanceof ImportRowError) throw err;
+        throw new ImportRowError(s.rowNo, err instanceof Error ? err.message : String(err));
+      }
+    }
+    await tx.commit();
+  } catch (err) {
+    await tx.rollback().catch(() => {});
+    throw err;
+  }
+  return { inserted, updated };
 }

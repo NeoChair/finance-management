@@ -1,8 +1,8 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import ExcelJS from "exceljs";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
+import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
 
 function formatDate(v: string | null): string {
@@ -29,8 +29,11 @@ const FILTER_ROW_H = 32;
 const thBase = "sticky z-10 px-3 font-semibold whitespace-nowrap text-left text-[13px] text-gray-600 bg-gray-100";
 const thSortable = `${thBase} group cursor-pointer select-none hover:bg-gray-200/70`;
 const thGroup = "sticky top-0 z-10 h-9 px-3 text-center text-[13px] font-semibold text-gray-700 bg-[#ff4b4b]/15";
-const tdBase = "px-3 py-2.5 whitespace-nowrap text-[13px] text-gray-700";
+const tdBase = "px-2.5 py-1.5 whitespace-nowrap text-[13px] text-gray-700";
 const checkboxCls = "h-4 w-4 cursor-pointer rounded border-gray-300 accent-[#ff4b4b]";
+// Toolbar buttons share one look: outlined, Font Awesome icon + label, brand colour on hover.
+const toolbarBtnCls =
+  "inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-600 hover:border-[#ff4b4b] hover:text-[#ff4b4b]";
 // Unsaved-edit indicator — always an inline dot placed right before the value, never
 // absolutely positioned, so it can never sit on top of other content (e.g. a delete button)
 // regardless of which cell it appears in.
@@ -96,6 +99,8 @@ export default function InvoiceTable({
   // Mirrors manualEntry synchronously: the select's blur can fire in the same tick it's swapped
   // out for the text input, before the state update is visible to that handler.
   const manualEntryRef = useRef(false);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadPartyOptions = useCallback(() => {
     fetch("/api/invoice/options")
@@ -345,6 +350,48 @@ export default function InvoiceTable({
   const sections = getInvoiceSections(prdLineCd);
   const allColumns = sections.flatMap((s) => s.columns);
   const totalCols = 1 + sections.reduce((sum, s) => sum + s.columns.length, 0); // +1 checkbox col
+
+  // Frozen panes: the checkbox column plus the leading ungrouped section (SHIPPER … USD) stay
+  // pinned while scrolling sideways. Column widths are content-sized, so each pinned column's
+  // `left` offset is measured from the DOM (index 0 = checkbox, i + 1 = i-th frozen column).
+  const frozenCols = sections[0]?.groupLabel === null ? sections[0].columns : [];
+  const frozenCount = frozenCols.length;
+  const frozenPos = new Map(frozenCols.map((c, i) => [c.key, i + 1]));
+  const frozenCellRefs = useRef<(HTMLTableCellElement | null)[]>([]);
+  const [frozenLeft, setFrozenLeft] = useState<number[]>([]);
+  const tableReady = rows !== null;
+
+  useLayoutEffect(() => {
+    if (!tableReady) return;
+    const cells = frozenCellRefs.current.slice(0, frozenCount + 1);
+    const measure = () => {
+      const lefts: number[] = [];
+      let x = 0;
+      for (const cell of cells) {
+        lefts.push(x);
+        x += cell?.getBoundingClientRect().width ?? 0;
+      }
+      setFrozenLeft((prev) => (prev.length === lefts.length && prev.every((v, i) => Math.abs(v - lefts[i]) < 0.5) ? prev : lefts));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    for (const cell of cells) if (cell) observer.observe(cell);
+    return () => observer.disconnect();
+  }, [tableReady, frozenCount]);
+
+  /** Sticky-left props for a frozen cell (colKey null = the checkbox column); empty otherwise.
+   *  `bg` must be opaque so scrolled-under cells don't show through. */
+  function frozen(colKey: string | null, bg: string, zIndex = 5, span = 1): { cls: string; style: CSSProperties } {
+    const pos = colKey === null ? 0 : frozenPos.get(colKey);
+    if (pos === undefined) return { cls: "", style: {} };
+    const isEdge = pos + span - 1 === frozenCount;
+    return {
+      cls: `sticky ${bg}`,
+      style: { left: frozenLeft[pos] ?? 0, zIndex, ...(isEdge ? { borderRight: "2px solid #9ca3af" } : null) },
+    };
+  }
+  const rowBg = "bg-white group-hover/row:bg-gray-50";
+  const subRowBg = "bg-gray-50";
   const pendingCount = Object.keys(pendingCellEdits).length + Object.keys(pendingSkuEdits).length;
   const activeFilterCount = Object.values(columnFilters).filter((v) => v).length;
 
@@ -418,40 +465,78 @@ export default function InvoiceTable({
     }, 0);
   }
 
-  async function handleDownload() {
-    if (!rows) return;
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Sheet1");
-
-    sheet.addRow(sections.flatMap((s) => s.columns.map((c) => c.label)));
-    sheet.getRow(1).font = { bold: true };
-
-    for (const r of rows) {
-      sheet.addRow(sections.flatMap((s) => s.columns.map((c) => formatCell(c, c.getValue(r)))));
-    }
-    sheet.columns.forEach((col) => { col.width = 16; });
-
-    const buffer = await workbook.xlsx.writeBuffer();
+  // The download and the blank template share one layout, so a downloaded file can be edited
+  // and uploaded back as-is.
+  async function saveWorkbook(dataRows: InvoiceRow[], name: string) {
+    const buffer = await buildInvoiceWorkbook(prdLineCd, dataRows);
     const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${fileName}.xlsx`;
+    a.download = `${name}.xlsx`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function handleDownload() {
+    if (!rows) return;
+    await saveWorkbook(rows, fileName);
+  }
+
+  async function handleTemplateDownload() {
+    setUploadMenuOpen(false);
+    await saveWorkbook([], `${fileName}_template`);
+  }
+
+  async function handleUploadFile(file: File) {
+    setSaving(true);
+    try {
+      let uploadRows;
+      try {
+        uploadRows = await parseInvoiceWorkbook(prdLineCd, await file.arrayBuffer());
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "파일을 읽을 수 없습니다.");
+        return;
+      }
+      if (uploadRows.length === 0) {
+        alert("업로드할 데이터가 없습니다.");
+        return;
+      }
+      if (!confirm(`${uploadRows.length}건을 업로드할까요?\n이미 있는 컨테이너는 수정되고, 없는 컨테이너는 새로 추가됩니다. (빈 칸은 기존 값을 유지합니다)`)) return;
+
+      const res = await fetch(`${apiUrl}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: uploadRows }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errors: string[] = Array.isArray(data.errors) ? data.errors : [];
+        const shown = errors.slice(0, 10).join("\n");
+        const more = errors.length > 10 ? `\n… 외 ${errors.length - 10}건` : "";
+        alert(`${data.message ?? "업로드에 실패했습니다."}${shown ? `\n\n${shown}${more}` : ""}`);
+        return;
+      }
+      alert(`업로드 완료: 추가 ${data.inserted}건, 수정 ${data.updated}건`);
+      await load();
+      loadPartyOptions();
+    } finally {
+      setSaving(false);
+    }
   }
 
   function renderCell(col: InvoiceColumn, row: InvoiceRow) {
     const isEditing = editingCell?.shpmId === row.shpmId && editingCell?.colKey === col.key;
     const isPending = `${row.shpmId}:${col.key}` in pendingCellEdits;
     const cellCls = `${tdBase} ${col.align === "right" ? "text-right" : ""} ${col.editTarget ? "cursor-pointer hover:bg-gray-50" : ""}`;
+    const fz = frozen(col.key, rowBg);
 
     if (isEditing && col.select === "used" && col.editTarget && !manualEntry) {
       const opts = partyOptions[optionKey(col.editTarget)] ?? [];
       // Keep the current value selectable even if it's no longer used anywhere else.
       const hasCurrent = !draft || opts.includes(draft);
       return (
-        <td key={col.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
+        <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
           <select
             autoFocus
             value={draft}
@@ -479,7 +564,7 @@ export default function InvoiceTable({
                 {v}
               </option>
             ))}
-            <option value={MANUAL_ENTRY}>✎ 직접 입력…</option>
+            <option value={MANUAL_ENTRY}>직접 입력…</option>
           </select>
         </td>
       );
@@ -487,7 +572,7 @@ export default function InvoiceTable({
 
     if (isEditing) {
       return (
-        <td key={col.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
+        <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
           <input
             autoFocus
             type={col.format === "date" ? "date" : isNumericEdit(col) ? "number" : "text"}
@@ -506,7 +591,7 @@ export default function InvoiceTable({
     }
 
     return (
-      <td key={col.key} className={cellCls} style={tdBorder} onClick={() => startEdit(col, row)}>
+      <td key={col.key} className={`${cellCls} ${fz.cls}`} style={{ ...tdBorder, ...fz.style }} onClick={() => startEdit(col, row)}>
         {isPending && pendingDot}
         {formatCell(col, getEffectiveValue(col, row))}
       </td>
@@ -533,11 +618,12 @@ export default function InvoiceTable({
   }
 
   function renderSkuCell(col: InvoiceColumn, sku: InvoiceSku, shpmId: number) {
+    const fz = frozen(col.key, subRowBg);
     if (col.skuField === "sku") {
       const editingCode = editingSku?.shpmDtlId === sku.shpmDtlId && editingSku.field === "skuCd";
       const codePending = `${sku.shpmDtlId}:skuCd` in pendingSkuEdits;
       return (
-        <td key={col.key} className={tdBase} style={tdBorder}>
+        <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style }}>
           <div className="flex items-center justify-between gap-1.5">
             <span className="flex items-center">
               {codePending && pendingDot}
@@ -563,7 +649,7 @@ export default function InvoiceTable({
       const isPending = `${sku.shpmDtlId}:${field}` in pendingSkuEdits;
       if (isEditing) {
         return (
-          <td key={col.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
+          <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
             {skuInput(field, shpmId, sku.shpmDtlId, `${inlineEditCls} text-right`)}
           </td>
         );
@@ -572,8 +658,8 @@ export default function InvoiceTable({
       return (
         <td
           key={col.key}
-          className={`${tdBase} cursor-pointer text-right hover:bg-gray-50`}
-          style={tdBorder}
+          className={`${tdBase} cursor-pointer text-right hover:bg-gray-50 ${fz.cls}`}
+          style={{ ...tdBorder, ...fz.style }}
           onClick={() => startEditSku(sku, field)}
         >
           {isPending && pendingDot}
@@ -582,7 +668,7 @@ export default function InvoiceTable({
       );
     }
 
-    return <td key={col.key} className={`${tdBase} ${col.align === "right" ? "text-right" : ""}`} style={tdBorder} />;
+    return <td key={col.key} className={`${tdBase} ${col.align === "right" ? "text-right" : ""} ${fz.cls}`} style={{ ...tdBorder, ...fz.style }} />;
   }
 
   return (
@@ -595,37 +681,68 @@ export default function InvoiceTable({
           <div className="flex items-center gap-2">
             {saving && <span className="text-xs text-gray-400">처리 중...</span>}
             {activeFilterCount > 0 && (
-              <button
-                onClick={() => setColumnFilters({})}
-                className="h-9 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-500 hover:border-[#ff4b4b] hover:text-[#ff4b4b]"
-              >
+              <button onClick={() => setColumnFilters({})} className={toolbarBtnCls}>
+                <i className="fa-solid fa-filter-circle-xmark text-xs" />
                 필터 초기화 ({activeFilterCount})
               </button>
             )}
-            <button
-              onClick={handleSaveAll}
-              className="h-9 rounded-lg border border-[#ff4b4b] bg-white px-3.5 text-sm font-medium text-[#ff4b4b] hover:bg-[#fff5f5]"
-            >
+            <button onClick={handleSaveAll} className={toolbarBtnCls}>
+              <i className="fa-solid fa-floppy-disk text-xs" />
               저장{pendingCount > 0 ? ` (${pendingCount})` : ""}
             </button>
-            <button
-              onClick={handleBulkDelete}
-              className="h-9 rounded-lg bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e03e3e]"
-            >
+            <button onClick={handleBulkDelete} className={toolbarBtnCls}>
+              <i className="fa-solid fa-trash text-xs" />
               삭제{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
             </button>
-            <button
-              onClick={handleAddRow}
-              className="h-9 rounded-lg bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e03e3e]"
-            >
-              + 추가
+            <button onClick={handleAddRow} className={toolbarBtnCls}>
+              <i className="fa-solid fa-plus text-xs" />
+              추가
             </button>
-            <button
-              onClick={handleDownload}
-              className="h-9 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-500 hover:border-[#ff4b4b] hover:text-[#ff4b4b]"
-            >
-              ⬇️ Download
+            <button onClick={handleDownload} className={toolbarBtnCls}>
+              <i className="fa-solid fa-download text-xs" />
+              엑셀 내려받기
             </button>
+            <div className="relative">
+              <button onClick={() => setUploadMenuOpen((open) => !open)} className={toolbarBtnCls}>
+                <i className="fa-solid fa-upload text-xs" />
+                엑셀 업로드
+              </button>
+              {uploadMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-20" onClick={() => setUploadMenuOpen(false)} />
+                  <div className="absolute right-0 top-10 z-30 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <button
+                      onClick={handleTemplateDownload}
+                      className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
+                    >
+                      <i className="fa-solid fa-file-arrow-down mr-2 text-xs" />
+                      양식 다운받기
+                    </button>
+                    <button
+                      onClick={() => {
+                        setUploadMenuOpen(false);
+                        fileInputRef.current?.click();
+                      }}
+                      className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
+                    >
+                      <i className="fa-solid fa-file-arrow-up mr-2 text-xs" />
+                      파일 업로드
+                    </button>
+                  </div>
+                </>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = ""; // allow picking the same file again
+                  if (file) handleUploadFile(file);
+                }}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -636,23 +753,39 @@ export default function InvoiceTable({
         <div className="hover-scroll overflow-auto px-2" style={{ maxHeight: "calc(100vh - 280px)" }}>
           <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: "13px" }}>
             <thead>
-              {/* Row 1: ungrouped columns get their one header cell here (rowSpan=2); grouped
-                  sections show their group label here, spanning their sub-columns. Both <tr>s get
-                  an explicit height so the rowSpan cell's total height always matches exactly. */}
+              {/* Two header rows, like the source sheets. Row 1: grouped sections show their group
+                  label spanning their sub-columns; ungrouped columns show their topLabel (or
+                  repeat their label), with equal neighbours ("실" over ETD/ETA) merged. Row 2:
+                  every column's own sortable label. */}
               <tr style={{ height: HEADER_ROW_H }}>
-                <th className={thBase} style={{ ...thBorder, top: 0 }} rowSpan={3}>
+                <th
+                  ref={(el) => {
+                    frozenCellRefs.current[0] = el;
+                  }}
+                  className={thBase}
+                  style={{ ...thBorder, top: 0, ...frozen(null, "", 20).style }}
+                  rowSpan={3}
+                >
                   <input type="checkbox" className={checkboxCls} checked={allSelected} onChange={() => toggleSelectAll(pageIds)} />
                 </th>
                 {sections.map((s, si) =>
                   s.groupLabel === null ? (
-                    s.columns.map((c) => (
-                      <th key={c.key} className={thSortable} style={{ ...thBorder, top: 0 }} rowSpan={2} onClick={() => handleSort(c.key)}>
-                        <span className="inline-flex items-center gap-1">
-                          {c.label}
-                          {sortIcon(c.key)}
-                        </span>
-                      </th>
-                    ))
+                    s.columns.map((c, ci) => {
+                      const top = c.topLabel ?? c.label;
+                      if (ci > 0 && (s.columns[ci - 1].topLabel ?? s.columns[ci - 1].label) === top) return null;
+                      let span = 1;
+                      while (ci + span < s.columns.length && (s.columns[ci + span].topLabel ?? s.columns[ci + span].label) === top) span++;
+                      return (
+                        <th
+                          key={c.key}
+                          colSpan={span}
+                          className={`${thBase} text-center`}
+                          style={{ ...thBorder, top: 0, ...frozen(c.key, "", 20, span).style }}
+                        >
+                          {top}
+                        </th>
+                      );
+                    })
                   ) : (
                     <th key={`grp-${si}`} colSpan={s.columns.length} className={thGroup} style={thBorder}>
                       {s.groupLabel}
@@ -661,29 +794,31 @@ export default function InvoiceTable({
                 )}
               </tr>
               <tr style={{ height: HEADER_ROW_H }}>
-                {sections.map((s, si) =>
-                  s.groupLabel === null ? null : (
-                    <Fragment key={`sub-${si}`}>
-                      {s.columns.map((c) => (
-                        <th
-                          key={c.key}
-                          className={`${thSortable} ${c.align === "right" ? "text-right" : ""}`}
-                          style={{ ...thBorder, top: HEADER_ROW_H }}
-                          onClick={() => handleSort(c.key)}
-                        >
-                          <span className="inline-flex items-center gap-1">
-                            {c.label}
-                            {sortIcon(c.key)}
-                          </span>
-                        </th>
-                      ))}
-                    </Fragment>
-                  )
-                )}
+                {allColumns.map((c) => (
+                  <th
+                    key={c.key}
+                    className={`${thSortable} ${c.align === "right" ? "text-right" : ""}`}
+                    style={{ ...thBorder, top: HEADER_ROW_H, ...frozen(c.key, "", 20).style }}
+                    onClick={() => handleSort(c.key)}
+                  >
+                    <span className="inline-flex items-center gap-1">
+                      {c.label}
+                      {sortIcon(c.key)}
+                    </span>
+                  </th>
+                ))}
               </tr>
               <tr style={{ height: FILTER_ROW_H }}>
                 {allColumns.map((c) => (
-                  <th key={c.key} className={thBase} style={{ ...thBorder, top: HEADER_ROW_H * 2, padding: "4px 8px" }}>
+                  <th
+                    key={c.key}
+                    ref={(el) => {
+                      const pos = frozenPos.get(c.key);
+                      if (pos !== undefined) frozenCellRefs.current[pos] = el;
+                    }}
+                    className={thBase}
+                    style={{ ...thBorder, top: HEADER_ROW_H * 2, padding: "4px 8px", ...frozen(c.key, "", 20).style }}
+                  >
                     <input
                       value={columnFilters[c.key] ?? ""}
                       onChange={(e) => {
@@ -703,8 +838,8 @@ export default function InvoiceTable({
                 const isExpanded = expanded.has(r.shpmId);
                 return (
                   <Fragment key={r.shpmId}>
-                    <tr className="bg-white hover:bg-gray-50/70">
-                      <td className={tdBase} style={tdBorder}>
+                    <tr className="group/row bg-white hover:bg-gray-50/70">
+                      <td className={`${tdBase} ${frozen(null, rowBg).cls}`} style={{ ...tdBorder, ...frozen(null, rowBg).style }}>
                         <input type="checkbox" className={checkboxCls} checked={selectedIds.has(r.shpmId)} onChange={() => toggleSelect(r.shpmId)} />
                       </td>
                       {sections.map((s, si) => (
@@ -715,8 +850,8 @@ export default function InvoiceTable({
                                 key={c.key}
                                 onClick={() => toggleExpanded(r.shpmId)}
                                 onDoubleClick={() => startEdit({ ...c, editTarget: { kind: "master", field: "contNo" } }, r)}
-                                className={`${tdBase} cursor-pointer font-medium text-[#ff4b4b] hover:bg-gray-50`}
-                                style={tdBorder}
+                                className={`${tdBase} cursor-pointer font-medium text-[#ff4b4b] hover:bg-gray-50 ${frozen(c.key, rowBg).cls}`}
+                                style={{ ...tdBorder, ...frozen(c.key, rowBg).style }}
                                 title="클릭: SKU 상세 펼치기 / 더블클릭: 수정"
                               >
                                 {`${r.shpmId}:${c.key}` in pendingCellEdits && pendingDot}
@@ -751,7 +886,7 @@ export default function InvoiceTable({
                     {isExpanded &&
                       r.skuDetails.map((sku) => (
                         <tr key={sku.shpmDtlId} className="bg-gray-50/60">
-                          <td className={tdBase} style={tdBorder} />
+                          <td className={`${tdBase} ${frozen(null, subRowBg).cls}`} style={{ ...tdBorder, ...frozen(null, subRowBg).style }} />
                           {sections.map((s, si) => (
                             <Fragment key={si}>{s.columns.map((c) => renderSkuCell(c, sku, r.shpmId))}</Fragment>
                           ))}
@@ -759,9 +894,13 @@ export default function InvoiceTable({
                       ))}
                     {isExpanded && (
                       <tr className="bg-gray-50/60">
-                        <td className={tdBase} style={tdBorder} />
+                        <td className={`${tdBase} ${frozen(null, subRowBg).cls}`} style={{ ...tdBorder, ...frozen(null, subRowBg).style }} />
                         <td colSpan={totalCols - 1} className={tdBase} style={tdBorder}>
-                          <button onClick={() => handleAddSku(r.shpmId)} className="text-xs text-gray-400 hover:text-[#ff4b4b]">
+                          <button
+                            onClick={() => handleAddSku(r.shpmId)}
+                            className="sticky text-xs text-gray-400 hover:text-[#ff4b4b]"
+                            style={{ left: (frozenLeft[1] ?? 0) + 10 }}
+                          >
                             <i className="fa-solid fa-plus mr-1 text-[10px]" />
                             SKU 추가
                           </button>
@@ -774,11 +913,15 @@ export default function InvoiceTable({
             </tbody>
             <tfoot>
               <tr className="sticky bottom-0 z-10 border-t-2 border-gray-200 bg-gray-50/95 font-semibold text-gray-700">
-                <td className={tdBase} style={tdBorder}>
+                <td className={`${tdBase} ${frozen(null, subRowBg).cls}`} style={{ ...tdBorder, ...frozen(null, subRowBg).style }}>
                   합계
                 </td>
                 {allColumns.map((c) => (
-                  <td key={c.key} className={`${tdBase} ${c.align === "right" ? "text-right" : ""}`} style={tdBorder}>
+                  <td
+                    key={c.key}
+                    className={`${tdBase} ${c.align === "right" ? "text-right" : ""} ${frozen(c.key, subRowBg).cls}`}
+                    style={{ ...tdBorder, ...frozen(c.key, subRowBg).style }}
+                  >
                     {c.align === "right" && c.format !== "date" ? formatCell(c, sumColumn(c)) : ""}
                   </td>
                 ))}

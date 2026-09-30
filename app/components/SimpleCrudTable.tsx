@@ -23,6 +23,9 @@ type Row = Record<string, string | null>;
 const thBase = "sticky top-0 z-10 px-3 py-2.5 font-semibold whitespace-nowrap text-left text-[13px] text-gray-600 bg-gray-100";
 const tdBase = "px-3 py-2.5 whitespace-nowrap text-[13px] text-gray-700";
 const checkboxCls = "h-4 w-4 cursor-pointer rounded border-gray-300 accent-[#ff4b4b]";
+// Toolbar buttons share one look: outlined, Font Awesome icon + label, brand colour on hover.
+const toolbarBtnCls =
+  "inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-600 hover:border-[#ff4b4b] hover:text-[#ff4b4b]";
 const thBorder = { borderRight: "1px solid #9ca3af", borderBottom: "1px solid #9ca3af" };
 const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted #9ca3af" };
 const inlineEditCls = "w-full min-w-[60px] border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none";
@@ -208,23 +211,17 @@ export default function SimpleCrudTable({
         {rows && (
           <div className="flex items-center gap-2">
             {saving && <span className="text-xs text-gray-400">처리 중...</span>}
-            <button
-              onClick={handleSaveAll}
-              className="h-9 rounded-lg border border-[#ff4b4b] bg-white px-3.5 text-sm font-medium text-[#ff4b4b] hover:bg-[#fff5f5]"
-            >
+            <button onClick={handleSaveAll} className={toolbarBtnCls}>
+              <i className="fa-solid fa-floppy-disk text-xs" />
               저장{pendingCount > 0 ? ` (${pendingCount})` : ""}
             </button>
-            <button
-              onClick={handleBulkDelete}
-              className="h-9 rounded-lg bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e03e3e]"
-            >
+            <button onClick={handleBulkDelete} className={toolbarBtnCls}>
+              <i className="fa-solid fa-trash text-xs" />
               삭제{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
             </button>
-            <button
-              onClick={handleAddRow}
-              className="h-9 rounded-lg bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e03e3e]"
-            >
-              + 추가
+            <button onClick={handleAddRow} className={toolbarBtnCls}>
+              <i className="fa-solid fa-plus text-xs" />
+              추가
             </button>
           </div>
         )}

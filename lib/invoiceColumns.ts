@@ -1,12 +1,10 @@
-import type { InvoiceCost, InvoiceRow } from "./invoice";
+import type { InvoiceCost, InvoiceRow, PartyField } from "./invoice";
 
+/** party/cost: `field` is the column of the invoice/cost line a cell edits; absent = the amount. */
 export type EditTarget =
   | { kind: "master"; field: string }
   | { kind: "party"; invTpCd: "NEO" | "FACTORY"; field?: PartyField }
   | { kind: "cost"; costTpCd: string; field?: PartyField };
-
-/** Which party column of an invoice/cost line a cell edits; absent = the amount. */
-export type PartyField = "sndrNm" | "rcvrNm";
 
 /** Key identifying one DB column's value set, shared by the options API and the dropdowns:
  *  "master:suplFactNm", "party:NEO:sndrNm", "cost:DUTY:rcvrNm". */
@@ -19,6 +17,9 @@ export function optionKey(t: EditTarget): string {
 export type InvoiceColumn = {
   key: string;
   label: string;
+  /** Upper header-row label of an ungrouped column where the source sheet's two header rows
+   *  differ (e.g. "실" above ETD/ETA); defaults to `label`. */
+  topLabel?: string;
   align?: "right";
   /** Explicit cell format — avoids guessing from the label text. */
   format?: "date";
@@ -65,16 +66,17 @@ function costAmtCol(key: string, label: string, costTpCd: string, getter: (r: In
 // source. Where a source column has no matching field in the FM schema, it's included with a
 // blank getValue so the layout still matches — nothing is invented.
 //
-// editTarget marks which cells are inline-editable in the UI (amounts, the plain master fields,
-// and the Shipper/Sender/Receiver/Buyer/Seller names, which use a dropdown of used values).
-// Payment-date sub-fields stay read-only for now.
+// editTarget marks which cells are inline-editable in the UI and where an Excel-upload cell is
+// written: everything except the product Amount/QTY (the SUM of the SKU lines, edited per SKU)
+// and CONTAINER (edited via double-click). Shipper/Sender/Receiver/Buyer/Seller names use a
+// dropdown of used values.
 
 // ============ CHAIR_TYJ — sheet "TYJ" in 2026_CHAIR_TYJ_INV.xlsx ============
 export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: null,
     columns: [
-      { key: "shipper", label: "SHIPPER", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
+      { key: "shipper", label: "SHIPPER", topLabel: "SHPR", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
       { key: "status", label: "Status", editTarget: { kind: "master", field: "sttsNm" }, getValue: (r) => r.sttsNm },
       { key: "hbl", label: "H-BL", editTarget: { kind: "master", field: "hblNo" }, getValue: (r) => r.hblNo },
       { key: "mbl", label: "M-BL", editTarget: { kind: "master", field: "mblNo" }, getValue: (r) => r.mblNo },
@@ -83,10 +85,10 @@ export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
       { key: "invNo", label: "INV NO", editTarget: { kind: "master", field: "invNo" }, getValue: (r) => r.invNo },
       { key: "invDate", label: "INV DATE", format: "date", editTarget: { kind: "master", field: "invDe" }, getValue: (r) => r.invDe },
       { key: "pod", label: "POD", editTarget: { kind: "master", field: "podNm" }, getValue: (r) => r.podNm },
-      { key: "etd", label: "ETD", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
-      { key: "eta", label: "ETA", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
+      { key: "etd", label: "ETD", topLabel: "실", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
+      { key: "eta", label: "ETA", topLabel: "실", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
       { key: "wh", label: "WH arrival", format: "date", editTarget: { kind: "master", field: "wrhsArrvDe" }, getValue: (r) => r.wrhsArrvDe },
-      { key: "usd", label: "USD", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
+      { key: "usd", label: "USD", topLabel: "EX. Rate", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
     ],
   },
   {
@@ -96,7 +98,7 @@ export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
       { key: "prodQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "prodSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "prodRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
-      { key: "prodPayDate", label: "Payment date", align: "right", format: "date", getValue: (r) => r.neoInv?.payDe ?? null },
+      { key: "prodPayDate", label: "Payment date", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "NEO", field: "payDe" }, getValue: (r) => r.neoInv?.payDe ?? null },
     ],
   },
   {
@@ -105,7 +107,16 @@ export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
       costAmtCol("freightAmt", "Amount", "OCEAN_FREIGHT", ocean),
       { key: "freightSender", label: "SENDER", select: "used", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "sndrNm" }, getValue: (r) => ocean(r)?.sndrNm ?? null },
       { key: "freightRcver", label: "RCVer", select: "used", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "rcvrNm" }, getValue: (r) => ocean(r)?.rcvrNm ?? null },
-      { key: "freightPayDate", label: "Payment date", align: "right", format: "date", getValue: (r) => ocean(r)?.payDe ?? null },
+      { key: "freightPayDate", label: "Payment date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "payDe" }, getValue: (r) => ocean(r)?.payDe ?? null },
+    ],
+  },
+  {
+    groupLabel: "NEO CHAIR -> LINKONE GLS",
+    columns: [
+      { key: "linkoneInvNo", label: "INVOICE #", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "invNo" }, getValue: (r) => linkone(r)?.invNo ?? null },
+      costAmtCol("linkoneAmt", "LINKONE DEBIT", "LINKONE_DEBIT", linkone),
+      { key: "linkoneRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "rcvrNm" }, getValue: (r) => linkone(r)?.rcvrNm ?? null },
+      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "payDe" }, getValue: (r) => linkone(r)?.payDe ?? null },
     ],
   },
   {
@@ -113,16 +124,16 @@ export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("dutyAmt", "Amount", "DUTY", duty),
       { key: "dutyRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "DUTY", field: "rcvrNm" }, getValue: (r) => duty(r)?.rcvrNm ?? null },
-      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => duty(r)?.payDe ?? null },
+      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "DUTY", field: "payDe" }, getValue: (r) => duty(r)?.payDe ?? null },
     ],
   },
   {
     groupLabel: "TRUCKING",
     columns: [
-      { key: "truckInvNo", label: "INVOICE NO", getValue: (r) => trucking(r)?.invNo ?? null },
-      { key: "truckInvDate", label: "INVOICE DATE", align: "right", format: "date", getValue: (r) => trucking(r)?.invDe ?? null },
+      { key: "truckInvNo", label: "INVOICE NO", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "invNo" }, getValue: (r) => trucking(r)?.invNo ?? null },
+      { key: "truckInvDate", label: "INVOICE DATE", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "invDe" }, getValue: (r) => trucking(r)?.invDe ?? null },
       costAmtCol("truckAmt", "AMOUNT", "TRUCKING", trucking),
-      { key: "truckPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => trucking(r)?.payDe ?? null },
+      { key: "truckPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "payDe" }, getValue: (r) => trucking(r)?.payDe ?? null },
     ],
   },
 ];
@@ -132,7 +143,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: null,
     columns: [
-      { key: "shipper", label: "SHIPPER", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
+      { key: "shipper", label: "SHIPPER", topLabel: "SHPR", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
       { key: "status", label: "Status", editTarget: { kind: "master", field: "sttsNm" }, getValue: (r) => r.sttsNm },
       { key: "hbl", label: "H-BL", editTarget: { kind: "master", field: "hblNo" }, getValue: (r) => r.hblNo },
       { key: "mbl", label: "M-BL", editTarget: { kind: "master", field: "mblNo" }, getValue: (r) => r.mblNo },
@@ -141,10 +152,10 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
       { key: "invNo", label: "INV NO", editTarget: { kind: "master", field: "invNo" }, getValue: (r) => r.invNo },
       { key: "invDate", label: "INV DATE", align: "right", format: "date", editTarget: { kind: "master", field: "invDe" }, getValue: (r) => r.invDe },
       { key: "pod", label: "POD", editTarget: { kind: "master", field: "podNm" }, getValue: (r) => r.podNm },
-      { key: "etd", label: "ETD", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
-      { key: "eta", label: "ETA", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
+      { key: "etd", label: "ETD", topLabel: "실", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
+      { key: "eta", label: "ETA", topLabel: "실", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
       { key: "wh", label: "WH arrival", format: "date", editTarget: { kind: "master", field: "wrhsArrvDe" }, getValue: (r) => r.wrhsArrvDe },
-      { key: "usd", label: "USD", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
+      { key: "usd", label: "USD", topLabel: "EX. Rate", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
     ],
   },
   {
@@ -154,7 +165,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
       { key: "neoQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "neoSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "neoRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
-      { key: "neoPayDate", label: "Payment date", align: "right", format: "date", getValue: (r) => r.neoInv?.payDe ?? null },
+      { key: "neoPayDate", label: "Payment date", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "NEO", field: "payDe" }, getValue: (r) => r.neoInv?.payDe ?? null },
     ],
   },
   {
@@ -163,7 +174,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
       { key: "hsAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "FACTORY" }, getValue: (r) => r.factoryInv?.amt ?? null },
       { key: "hsBuyer", label: "BUYER", select: "used", editTarget: { kind: "party", invTpCd: "FACTORY", field: "rcvrNm" }, getValue: (r) => r.factoryInv?.rcvrNm ?? null },
       { key: "hsSeller", label: "SELLER", select: "used", editTarget: { kind: "party", invTpCd: "FACTORY", field: "sndrNm" }, getValue: (r) => r.factoryInv?.sndrNm ?? null },
-      { key: "hsPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => r.factoryInv?.payDe ?? null },
+      { key: "hsPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "FACTORY", field: "payDe" }, getValue: (r) => r.factoryInv?.payDe ?? null },
     ],
   },
   {
@@ -171,7 +182,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("dutyAmt", "Amount", "DUTY", duty),
       { key: "dutyRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "DUTY", field: "rcvrNm" }, getValue: (r) => duty(r)?.rcvrNm ?? null },
-      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => duty(r)?.payDe ?? null },
+      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "DUTY", field: "payDe" }, getValue: (r) => duty(r)?.payDe ?? null },
     ],
   },
   {
@@ -181,7 +192,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
       costAmtCol("hdcChg", "HDC CHG", "HDC_CHG", hdc),
       costAmtCol("ocfHdc", "OCF/HDC", "OCF_HDC", ocfHdc),
       { key: "ofrtRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "rcvrNm" }, getValue: (r) => ocean(r)?.rcvrNm ?? null },
-      { key: "ofrtPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => ocean(r)?.payDe ?? null },
+      { key: "ofrtPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "payDe" }, getValue: (r) => ocean(r)?.payDe ?? null },
     ],
   },
   {
@@ -189,7 +200,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("linkoneAmt", "LINKONE DEBIT", "LINKONE_DEBIT", linkone),
       { key: "linkoneRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "rcvrNm" }, getValue: (r) => linkone(r)?.rcvrNm ?? null },
-      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => linkone(r)?.payDe ?? null },
+      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "payDe" }, getValue: (r) => linkone(r)?.payDe ?? null },
     ],
   },
   {
@@ -197,7 +208,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("costAmt", "COST", "COST", costCost),
       { key: "costRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "COST", field: "rcvrNm" }, getValue: (r) => costCost(r)?.rcvrNm ?? null },
-      { key: "costPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => costCost(r)?.payDe ?? null },
+      { key: "costPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "COST", field: "payDe" }, getValue: (r) => costCost(r)?.payDe ?? null },
     ],
   },
   {
@@ -207,22 +218,21 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "TRUCKING",
     columns: [
-      { key: "truckInvNo", label: "INVOICE NO", getValue: (r) => trucking(r)?.invNo ?? null },
-      { key: "truckInvDate", label: "INVOICE DATE", align: "right", format: "date", getValue: (r) => trucking(r)?.invDe ?? null },
+      { key: "truckInvNo", label: "INVOICE NO", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "invNo" }, getValue: (r) => trucking(r)?.invNo ?? null },
+      { key: "truckInvDate", label: "INVOICE DATE", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "invDe" }, getValue: (r) => trucking(r)?.invDe ?? null },
       costAmtCol("truckAmt", "AMOUNT", "TRUCKING", trucking),
-      { key: "truckPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => trucking(r)?.payDe ?? null },
+      { key: "truckPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "payDe" }, getValue: (r) => trucking(r)?.payDe ?? null },
     ],
   },
 ];
 
 // ============ CHAIR-WF — "CHAIR-WF" block in Book2.xlsx (Wayfair chair shipments) ============
-// Same shape as CHAIR, plus LOAD_TYPE/SUB PO (Wayfair PO splits ship as multiple sub-POs)
-// and a "Total amount" sub-field under HYGGE -> SHIPPER.
+// Same shape as CHAIR, plus LOAD_TYPE/SUB PO (Wayfair PO splits ship as multiple sub-POs).
 export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: null,
     columns: [
-      { key: "shipper", label: "SHIPPER", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
+      { key: "shipper", label: "SHIPPER", topLabel: "SHPR", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
       { key: "loadType", label: "LOAD_TYPE", editTarget: { kind: "master", field: "loadType" }, getValue: (r) => r.loadType },
       { key: "status", label: "Status", editTarget: { kind: "master", field: "sttsNm" }, getValue: (r) => r.sttsNm },
       { key: "hbl", label: "H-BL", editTarget: { kind: "master", field: "hblNo" }, getValue: (r) => r.hblNo },
@@ -233,10 +243,10 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
       { key: "invNo", label: "INV NO", editTarget: { kind: "master", field: "invNo" }, getValue: (r) => r.invNo },
       { key: "invDate", label: "INV DATE", align: "right", format: "date", editTarget: { kind: "master", field: "invDe" }, getValue: (r) => r.invDe },
       { key: "pod", label: "POD", editTarget: { kind: "master", field: "podNm" }, getValue: (r) => r.podNm },
-      { key: "etd", label: "ETD", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
-      { key: "eta", label: "ETA", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
+      { key: "etd", label: "ETD", topLabel: "실", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
+      { key: "eta", label: "ETA", topLabel: "실", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
       { key: "wh", label: "WH arrival", editTarget: { kind: "master", field: "wrhsArrvDe" }, getValue: (r) => r.wrhsArrvDe },
-      { key: "usd", label: "USD", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
+      { key: "usd", label: "USD", topLabel: "EX. Rate", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
     ],
   },
   {
@@ -246,17 +256,16 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
       { key: "neoQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "neoSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "neoRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
-      { key: "neoPayDate", label: "Payment date", align: "right", format: "date", getValue: (r) => r.neoInv?.payDe ?? null },
+      { key: "neoPayDate", label: "Payment date", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "NEO", field: "payDe" }, getValue: (r) => r.neoInv?.payDe ?? null },
     ],
   },
   {
     groupLabel: "HYGGE -> SHIPPER",
     columns: [
       { key: "hsAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "FACTORY" }, getValue: (r) => r.factoryInv?.amt ?? null },
-      { key: "hsTotalAmt", label: "Total amount", align: "right", getValue: () => null },
       { key: "hsBuyer", label: "BUYER", select: "used", editTarget: { kind: "party", invTpCd: "FACTORY", field: "rcvrNm" }, getValue: (r) => r.factoryInv?.rcvrNm ?? null },
       { key: "hsSeller", label: "SELLER", select: "used", editTarget: { kind: "party", invTpCd: "FACTORY", field: "sndrNm" }, getValue: (r) => r.factoryInv?.sndrNm ?? null },
-      { key: "hsPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => r.factoryInv?.payDe ?? null },
+      { key: "hsPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "FACTORY", field: "payDe" }, getValue: (r) => r.factoryInv?.payDe ?? null },
     ],
   },
   {
@@ -264,7 +273,7 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("dutyAmt", "NEO -> POD (Duty0%)", "DUTY", duty),
       { key: "dutyRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "DUTY", field: "rcvrNm" }, getValue: (r) => duty(r)?.rcvrNm ?? null },
-      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => duty(r)?.payDe ?? null },
+      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "DUTY", field: "payDe" }, getValue: (r) => duty(r)?.payDe ?? null },
     ],
   },
   {
@@ -274,7 +283,7 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
       costAmtCol("hdcChg", "HDC CHG", "HDC_CHG", hdc),
       costAmtCol("ocfHdc", "OCF/HDC", "OCF_HDC", ocfHdc),
       { key: "ofrtRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "rcvrNm" }, getValue: (r) => ocean(r)?.rcvrNm ?? null },
-      { key: "ofrtPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => ocean(r)?.payDe ?? null },
+      { key: "ofrtPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "payDe" }, getValue: (r) => ocean(r)?.payDe ?? null },
     ],
   },
   {
@@ -282,7 +291,7 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("linkoneAmt", "LINKONE DEBIT", "LINKONE_DEBIT", linkone),
       { key: "linkoneRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "rcvrNm" }, getValue: (r) => linkone(r)?.rcvrNm ?? null },
-      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => linkone(r)?.payDe ?? null },
+      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "payDe" }, getValue: (r) => linkone(r)?.payDe ?? null },
     ],
   },
   {
@@ -290,7 +299,7 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("costAmt", "COST", "COST", costCost),
       { key: "costRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "COST", field: "rcvrNm" }, getValue: (r) => costCost(r)?.rcvrNm ?? null },
-      { key: "costPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => costCost(r)?.payDe ?? null },
+      { key: "costPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "COST", field: "payDe" }, getValue: (r) => costCost(r)?.payDe ?? null },
     ],
   },
   {
@@ -304,7 +313,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: null,
     columns: [
-      { key: "shipper", label: "SHIPPER", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
+      { key: "shipper", label: "SHIPPER", topLabel: "SHPR", select: "used", editTarget: { kind: "master", field: "suplFactNm" }, getValue: (r) => r.suplFactNm },
       { key: "status", label: "Status", editTarget: { kind: "master", field: "sttsNm" }, getValue: (r) => r.sttsNm },
       { key: "hbl", label: "H-BL", editTarget: { kind: "master", field: "hblNo" }, getValue: (r) => r.hblNo },
       { key: "mbl", label: "M-BL", editTarget: { kind: "master", field: "mblNo" }, getValue: (r) => r.mblNo },
@@ -313,10 +322,10 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
       { key: "po", label: "PO NO", editTarget: { kind: "master", field: "poNo" }, getValue: (r) => r.poNo },
       { key: "invDate", label: "INV DATE", align: "right", format: "date", editTarget: { kind: "master", field: "invDe" }, getValue: (r) => r.invDe },
       { key: "pod", label: "POD", editTarget: { kind: "master", field: "podNm" }, getValue: (r) => r.podNm },
-      { key: "etd", label: "ETD", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
-      { key: "eta", label: "ETA", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
+      { key: "etd", label: "ETD", topLabel: "실", format: "date", editTarget: { kind: "master", field: "etd" }, getValue: (r) => r.etd },
+      { key: "eta", label: "ETA", topLabel: "실", format: "date", editTarget: { kind: "master", field: "eta" }, getValue: (r) => r.eta },
       { key: "wh", label: "WH arrival", format: "date", editTarget: { kind: "master", field: "wrhsArrvDe" }, getValue: (r) => r.wrhsArrvDe },
-      { key: "usd", label: "USD", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
+      { key: "usd", label: "USD", topLabel: "EX. Rate", align: "right", editTarget: { kind: "master", field: "usdExchRt" }, getValue: (r) => r.usdExchRt },
     ],
   },
   {
@@ -325,7 +334,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
       { key: "ohAmt", label: "Amount", align: "right", skuField: "amt", getValue: (r) => r.amt },
       { key: "ohSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "ohRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
-      { key: "ohPayDate", label: "Payment", align: "right", format: "date", getValue: (r) => r.neoInv?.payDe ?? null },
+      { key: "ohPayDate", label: "Payment", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "NEO", field: "payDe" }, getValue: (r) => r.neoInv?.payDe ?? null },
     ],
   },
   {
@@ -334,7 +343,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
       { key: "hdAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "FACTORY" }, getValue: (r) => r.factoryInv?.amt ?? null },
       { key: "hdQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "hdSeller", label: "SELLER", select: "used", editTarget: { kind: "party", invTpCd: "FACTORY", field: "sndrNm" }, getValue: (r) => r.factoryInv?.sndrNm ?? null },
-      { key: "hdPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => r.factoryInv?.payDe ?? null },
+      { key: "hdPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "FACTORY", field: "payDe" }, getValue: (r) => r.factoryInv?.payDe ?? null },
     ],
   },
   {
@@ -343,7 +352,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
       costAmtCol("ofrt", "O/FRT", "OCEAN_FREIGHT", ocean),
       costAmtCol("localChg", "LOCAL CHG", "LOCAL_CHG", localChg),
       { key: "ofrtRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "rcvrNm" }, getValue: (r) => ocean(r)?.rcvrNm ?? null },
-      { key: "ofrtPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => ocean(r)?.payDe ?? null },
+      { key: "ofrtPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "OCEAN_FREIGHT", field: "payDe" }, getValue: (r) => ocean(r)?.payDe ?? null },
     ],
   },
   {
@@ -351,7 +360,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("linkoneAmt", "LINKONE DEBIT", "LINKONE_DEBIT", linkone),
       { key: "linkoneRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "rcvrNm" }, getValue: (r) => linkone(r)?.rcvrNm ?? null },
-      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => linkone(r)?.payDe ?? null },
+      { key: "linkonePayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "LINKONE_DEBIT", field: "payDe" }, getValue: (r) => linkone(r)?.payDe ?? null },
     ],
   },
   {
@@ -359,7 +368,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
     columns: [
       costAmtCol("costAmt", "COST", "COST", costCost),
       { key: "costRcvr", label: "Receiver", select: "used", editTarget: { kind: "cost", costTpCd: "COST", field: "rcvrNm" }, getValue: (r) => costCost(r)?.rcvrNm ?? null },
-      { key: "costPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => costCost(r)?.payDe ?? null },
+      { key: "costPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "COST", field: "payDe" }, getValue: (r) => costCost(r)?.payDe ?? null },
     ],
   },
   {
@@ -370,56 +379,76 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
     groupLabel: "DUTY (HYGGE -> DREAM)",
     columns: [
       costAmtCol("dutyAmt", "DUTY", "DUTY", duty),
-      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => duty(r)?.payDe ?? null },
+      { key: "dutyPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "DUTY", field: "payDe" }, getValue: (r) => duty(r)?.payDe ?? null },
     ],
   },
   {
     groupLabel: "ISF FILING FEE",
     columns: [
       costAmtCol("isfAmt", "Amount", "ISF_FILING", isf),
-      { key: "isfPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => isf(r)?.payDe ?? null },
+      { key: "isfPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "ISF_FILING", field: "payDe" }, getValue: (r) => isf(r)?.payDe ?? null },
     ],
   },
   {
     groupLabel: "CUSTOMS ENTRY FEE",
     columns: [
       costAmtCol("customsAmt", "Amount", "CUSTOMS_ENTRY", customs),
-      { key: "customsPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => customs(r)?.payDe ?? null },
+      { key: "customsPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "CUSTOMS_ENTRY", field: "payDe" }, getValue: (r) => customs(r)?.payDe ?? null },
     ],
   },
   {
     groupLabel: "HANDLING CHARGE",
     columns: [
       costAmtCol("handlingAmt", "Amount", "HANDLING", handling),
-      { key: "handlingPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => handling(r)?.payDe ?? null },
+      { key: "handlingPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "HANDLING", field: "payDe" }, getValue: (r) => handling(r)?.payDe ?? null },
     ],
   },
   {
     groupLabel: "CPSC FILING",
     columns: [
       costAmtCol("cpscAmt", "Amount", "CPSC_FILING", cpsc),
-      { key: "cpscPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => cpsc(r)?.payDe ?? null },
+      { key: "cpscPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "CPSC_FILING", field: "payDe" }, getValue: (r) => cpsc(r)?.payDe ?? null },
       costAmtCol("dreamLinkoneAmt", "DREAM → linkone", "DREAM_LINKONE", dreamLinkone),
     ],
   },
   {
     groupLabel: "Other Handling Charge",
     columns: [
-      { key: "ohcInvNo", label: "Inv #", getValue: (r) => otherHandling(r)?.invNo ?? null },
+      { key: "ohcInvNo", label: "Inv #", editTarget: { kind: "cost", costTpCd: "OTHER_HANDLING", field: "invNo" }, getValue: (r) => otherHandling(r)?.invNo ?? null },
       costAmtCol("ohcAmt", "Amount", "OTHER_HANDLING", otherHandling),
-      { key: "ohcPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => otherHandling(r)?.payDe ?? null },
+      { key: "ohcPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "OTHER_HANDLING", field: "payDe" }, getValue: (r) => otherHandling(r)?.payDe ?? null },
     ],
   },
   {
     groupLabel: "TRUCKING",
     columns: [
-      { key: "truckInvNo", label: "INVOICE NO", getValue: (r) => trucking(r)?.invNo ?? null },
-      { key: "truckInvDate", label: "INVOICE DATE", align: "right", format: "date", getValue: (r) => trucking(r)?.invDe ?? null },
+      { key: "truckInvNo", label: "INVOICE NO", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "invNo" }, getValue: (r) => trucking(r)?.invNo ?? null },
+      { key: "truckInvDate", label: "INVOICE DATE", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "invDe" }, getValue: (r) => trucking(r)?.invDe ?? null },
       costAmtCol("truckAmt", "AMOUNT", "TRUCKING", trucking),
-      { key: "truckPayDate", label: "Payment Date", align: "right", format: "date", getValue: (r) => trucking(r)?.payDe ?? null },
+      { key: "truckPayDate", label: "Payment Date", align: "right", format: "date", editTarget: { kind: "cost", costTpCd: "TRUCKING", field: "payDe" }, getValue: (r) => trucking(r)?.payDe ?? null },
     ],
   },
 ];
+
+/** Where an uploaded Excel cell for this column is written; null = not uploadable. */
+export function getImportTarget(col: InvoiceColumn): EditTarget | null {
+  if (col.editTarget) return col.editTarget;
+  if (col.skuField === "sku") return { kind: "master", field: "contNo" };
+  return null;
+}
+
+export type ImportValueKind = "date" | "number" | "text";
+
+const DATE_FIELDS = new Set(["etd", "eta", "wrhsArrvDe", "invDe", "payDe"]);
+
+/** How an Excel cell for this column is parsed on upload / written on download. */
+export function getImportValueKind(col: InvoiceColumn): ImportValueKind {
+  const t = getImportTarget(col);
+  if (col.format === "date" || (t?.field && DATE_FIELDS.has(t.field))) return "date";
+  if (!t) return col.align === "right" ? "number" : "text";
+  if (t.kind === "master") return t.field === "usdExchRt" ? "number" : "text";
+  return t.field ? "text" : "number";
+}
 
 export function getInvoiceSections(prdLineCd: string): InvoiceSection[] {
   if (prdLineCd === "CHAIR_TYJ") return CHAIR_TYJ_SECTIONS;

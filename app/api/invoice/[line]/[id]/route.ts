@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateShipment, deleteShipment, applyFieldEdit, type ShipmentInput, type FieldEdit } from "@/lib/invoice";
+import { updateShipment, deleteShipment, applyFieldEdit, type ShipmentInput, type FieldEdit, type PartyField } from "@/lib/invoice";
 import { slugToProductLine } from "@/lib/productLines";
 
 const OWNR_ETP_CD = "KR-DT-HG";
 
 const MASTER_FIELDS = new Set([
   "suplFactNm", "sttsNm", "loadType", "hblNo", "mblNo", "contNo", "poNo",
-  "subpoNo", "podNm", "etd", "eta", "wrhsArrvDe", "usdExchRt", "currCd", "rmrk",
+  "subpoNo", "podNm", "etd", "eta", "wrhsArrvDe", "usdExchRt", "invNo", "invDe", "currCd", "rmrk",
 ]);
+const PARTY_FIELDS = new Set<string>(["sndrNm", "rcvrNm", "invNo", "invDe", "payDe"]);
 
 function parseFieldEdit(body: unknown): FieldEdit | null {
   if (typeof body !== "object" || body === null) return null;
@@ -16,9 +17,9 @@ function parseFieldEdit(body: unknown): FieldEdit | null {
   if (b.kind === "master" && typeof b.field === "string" && MASTER_FIELDS.has(b.field)) {
     return { kind: "master", field: b.field as FieldEdit extends { kind: "master"; field: infer F } ? F : never, value: (b.value as string | number | null) ?? null };
   }
-  // field absent → the amount (numeric); sndrNm/rcvrNm → a party name (text).
-  if (b.field !== undefined && b.field !== "sndrNm" && b.field !== "rcvrNm") return null;
-  const field = b.field as "sndrNm" | "rcvrNm" | undefined;
+  // field absent → the amount (numeric); otherwise a name / invoice no / YYYYMMDD date (text).
+  if (b.field !== undefined && !(typeof b.field === "string" && PARTY_FIELDS.has(b.field))) return null;
+  const field = b.field as PartyField | undefined;
   const value = b.value == null || b.value === "" ? null : field ? String(b.value) : Number(b.value);
 
   if (b.kind === "party" && (b.invTpCd === "NEO" || b.invTpCd === "FACTORY")) {

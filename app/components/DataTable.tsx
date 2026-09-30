@@ -152,10 +152,10 @@ export default function DataTable<T>({
                 <div className="mb-2 flex justify-end">
                     <button
                         onClick={handleDownload}
-                        className="w-50 h-10 rounded-md border border-gray-300 bg-white px-3 py-1 text-md text-gray-600 hover:text-[#ff4b4b] hover:border-[#ff4b4b]
-                        active:text-white active:bg-[#ff4b4b]"
+                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-600 hover:border-[#ff4b4b] hover:text-[#ff4b4b]"
                     >
-                        ⬇️ Download
+                        <i className="fa-solid fa-download text-xs" />
+                        엑셀 내려받기
                     </button>
                 </div>
             )}

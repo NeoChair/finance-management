@@ -48,10 +48,10 @@ const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted 
 // jumps in height the moment you click into it.
 const inlineEditCls = "w-full min-w-[60px] border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none";
 const inlineEditShadow = { boxShadow: "inset 0 -2px 0 0 #ff4b4b" };
-// Dropdowns read larger than the 13px grid text (the option list especially) — 15px, with a
-// fixed line box so the row still doesn't change height while the select is open.
+// The select is laid over the cell's (hidden) text instead of replacing it, so opening it never
+// changes the column width or row height. Only the option list reads larger (15px).
 const selectEditCls =
-  "w-full min-w-[150px] h-5 border-0 bg-transparent p-0 text-[15px] leading-5 text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
+  "absolute inset-0 h-full w-full border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
 
 type EditingCell = { shpmId: number; colKey: string };
 type SkuField = "skuCd" | "qty" | "unitPrc" | "amt";
@@ -379,15 +379,76 @@ export default function InvoiceTable({
     return () => observer.disconnect();
   }, [tableReady, frozenCount]);
 
-  /** Sticky-left props for a frozen cell (colKey null = the checkbox column); empty otherwise.
-   *  `bg` must be opaque so scrolled-under cells don't show through. */
+  // Column widths set by dragging a header's right edge (double-click resets to auto-fit);
+  // remembered per product line in this browser.
+  const widthsStorageKey = `invoiceColWidths:${prdLineCd}`;
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      return JSON.parse(window.localStorage.getItem(widthsStorageKey) ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  // True from mousedown on a resize handle until just after mouseup, so the click that ends a
+  // drag doesn't also sort the column.
+  const resizingRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(widthsStorageKey, JSON.stringify(colWidths));
+    } catch {
+      // storage unavailable — widths just won't persist
+    }
+  }, [widthsStorageKey, colWidths]);
+
+  function startResize(e: React.MouseEvent<HTMLElement>, colKey: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = e.currentTarget.parentElement;
+    if (!th) return;
+    const startX = e.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    resizingRef.current = true;
+    const onMove = (ev: MouseEvent) => {
+      const width = Math.max(40, Math.round(startWidth + ev.clientX - startX));
+      setColWidths((prev) => ({ ...prev, [colKey]: width }));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("cursor-col-resize");
+      setTimeout(() => {
+        resizingRef.current = false;
+      }, 0);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.classList.add("cursor-col-resize");
+  }
+
+  function resetWidth(colKey: string) {
+    setColWidths((prev) => {
+      const next = { ...prev };
+      delete next[colKey];
+      return next;
+    });
+  }
+
+  /** Per-column cell props: the user-set width (content is clipped to it), plus sticky-left
+   *  positioning for a frozen cell (colKey null = the checkbox column). `bg` must be opaque so
+   *  scrolled-under cells don't show through a frozen one. */
   function frozen(colKey: string | null, bg: string, zIndex = 5, span = 1): { cls: string; style: CSSProperties } {
+    const width = colKey !== null && span === 1 ? colWidths[colKey] : undefined;
+    const sized: CSSProperties = width
+      ? { width, minWidth: width, maxWidth: width, overflow: "hidden", textOverflow: "ellipsis" }
+      : {};
     const pos = colKey === null ? 0 : frozenPos.get(colKey);
-    if (pos === undefined) return { cls: "", style: {} };
+    if (pos === undefined) return { cls: "", style: sized };
     const isEdge = pos + span - 1 === frozenCount;
     return {
       cls: `sticky ${bg}`,
-      style: { left: frozenLeft[pos] ?? 0, zIndex, ...(isEdge ? { borderRight: "2px solid #9ca3af" } : null) },
+      style: { ...sized, left: frozenLeft[pos] ?? 0, zIndex, ...(isEdge ? { borderRight: "2px solid #9ca3af" } : null) },
     };
   }
   const rowBg = "bg-white group-hover/row:bg-gray-50";
@@ -447,13 +508,12 @@ export default function InvoiceTable({
     : null;
 
   const totalPages = sortedRows ? Math.max(1, Math.ceil(sortedRows.length / pageSize)) : 1;
-  const pagedRows = sortedRows ? sortedRows.slice((page - 1) * pageSize, page * pageSize) : null;
+  // `page` can outlive the rows it pointed at (a delete or filter shrinks the list), so clamp it
+  // while rendering instead of correcting the state afterwards.
+  const currentPage = Math.min(page, totalPages);
+  const pagedRows = sortedRows ? sortedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize) : null;
   const pageIds = pagedRows?.map((r) => r.shpmId) ?? [];
   const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
-
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
 
   // Subtotal covers every filtered/sorted row (not just the current page) — QTY/Amount columns
   // only; date columns are also right-aligned but obviously aren't summable.
@@ -537,6 +597,11 @@ export default function InvoiceTable({
       const hasCurrent = !draft || opts.includes(draft);
       return (
         <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
+          <div className="relative min-h-[1lh]">
+          <span className="invisible">
+            {isPending && pendingDot}
+            {formatCell(col, getEffectiveValue(col, row))}
+          </span>
           <select
             autoFocus
             value={draft}
@@ -566,6 +631,7 @@ export default function InvoiceTable({
             ))}
             <option value={MANUAL_ENTRY}>직접 입력…</option>
           </select>
+          </div>
         </td>
       );
     }
@@ -799,12 +865,21 @@ export default function InvoiceTable({
                     key={c.key}
                     className={`${thSortable} ${c.align === "right" ? "text-right" : ""}`}
                     style={{ ...thBorder, top: HEADER_ROW_H, ...frozen(c.key, "", 20).style }}
-                    onClick={() => handleSort(c.key)}
+                    onClick={() => {
+                      if (!resizingRef.current) handleSort(c.key);
+                    }}
                   >
                     <span className="inline-flex items-center gap-1">
                       {c.label}
                       {sortIcon(c.key)}
                     </span>
+                    <span
+                      onMouseDown={(e) => startResize(e, c.key)}
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={() => resetWidth(c.key)}
+                      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-[#ff4b4b]/50"
+                      title="드래그: 너비 조정 / 더블클릭: 자동 맞춤"
+                    />
                   </th>
                 ))}
               </tr>
@@ -954,18 +1029,18 @@ export default function InvoiceTable({
             </select>
             <div className="flex items-center gap-1.5">
               <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
+                onClick={() => setPage(Math.max(1, currentPage - 1))}
+                disabled={currentPage <= 1}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
               >
                 <i className="fa-solid fa-chevron-left text-xs" />
               </button>
               <span className="min-w-[56px] rounded-lg bg-[#ff4b4b] px-3 py-1.5 text-center text-sm font-medium text-white">
-                {page} / {totalPages}
+                {currentPage} / {totalPages}
               </span>
               <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
+                onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
+                disabled={currentPage >= totalPages}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
               >
                 <i className="fa-solid fa-chevron-right text-xs" />

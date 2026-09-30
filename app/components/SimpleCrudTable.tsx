@@ -30,10 +30,10 @@ const thBorder = { borderRight: "1px solid #9ca3af", borderBottom: "1px solid #9
 const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted #9ca3af" };
 const inlineEditCls = "w-full min-w-[60px] border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none";
 const inlineEditShadow = { boxShadow: "inset 0 -2px 0 0 #ff4b4b" };
-// Dropdowns read larger than the 13px grid text (the option list especially) — 15px, with a
-// fixed line box so the row still doesn't change height while the select is open.
+// The select is laid over the cell's (hidden) text instead of replacing it, so opening it never
+// changes the column width or row height. Only the option list reads larger (15px).
 const selectEditCls =
-  "w-full min-w-[150px] h-5 border-0 bg-transparent p-0 text-[15px] leading-5 text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
+  "absolute inset-0 h-full w-full border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
 const pendingDot = <span className="mr-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 align-middle" />;
 
 type EditingCell = { id: string; key: string };
@@ -260,24 +260,30 @@ export default function SimpleCrudTable({
                         const known = !draft || opts.some((o) => o.value === draft);
                         return (
                           <td key={c.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
-                            <select
-                              autoFocus
-                              value={draft}
-                              onChange={(e) => commitEdit(row, e.target.value)}
-                              onBlur={() => setEditingCell(null)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Escape") setEditingCell(null);
-                              }}
-                              className={selectEditCls}
-                            >
-                              {c.allowEmpty !== false && <option value="">(없음)</option>}
-                              {!known && <option value={draft}>{draft}</option>}
-                              {opts.map((o) => (
-                                <option key={o.value} value={o.value}>
-                                  {o.label}
-                                </option>
-                              ))}
-                            </select>
+                            <div className="relative min-h-[1lh]">
+                              <span className="invisible">
+                                {isPending && pendingDot}
+                                {opts.find((o) => o.value === getEffectiveValue(row, c.key))?.label ?? getEffectiveValue(row, c.key)}
+                              </span>
+                              <select
+                                autoFocus
+                                value={draft}
+                                onChange={(e) => commitEdit(row, e.target.value)}
+                                onBlur={() => setEditingCell(null)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape") setEditingCell(null);
+                                }}
+                                className={selectEditCls}
+                              >
+                                {c.allowEmpty !== false && <option value="">(없음)</option>}
+                                {!known && <option value={draft}>{draft}</option>}
+                                {opts.map((o) => (
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
                           </td>
                         );
                       }

@@ -23,14 +23,17 @@ type Row = Record<string, string | null>;
 const thBase = "sticky top-0 z-10 px-3 py-2.5 font-semibold whitespace-nowrap text-left text-[13px] text-gray-600 bg-gray-100";
 const tdBase = "px-3 py-2.5 whitespace-nowrap text-[13px] text-gray-700";
 const checkboxCls = "h-4 w-4 cursor-pointer rounded border-gray-300 accent-[#ff4b4b]";
+// Toolbar buttons share one look: outlined, Font Awesome icon + label, brand colour on hover.
+const toolbarBtnCls =
+  "inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-600 hover:border-[#ff4b4b] hover:text-[#ff4b4b]";
 const thBorder = { borderRight: "1px solid #9ca3af", borderBottom: "1px solid #9ca3af" };
 const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted #9ca3af" };
 const inlineEditCls = "w-full min-w-[60px] border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none";
 const inlineEditShadow = { boxShadow: "inset 0 -2px 0 0 #ff4b4b" };
-// Dropdowns read larger than the 13px grid text (the option list especially) — 15px, with a
-// fixed line box so the row still doesn't change height while the select is open.
+// The select is laid over the cell's (hidden) text instead of replacing it, so opening it never
+// changes the column width or row height. Only the option list reads larger (15px).
 const selectEditCls =
-  "w-full min-w-[150px] h-5 border-0 bg-transparent p-0 text-[15px] leading-5 text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
+  "absolute inset-0 h-full w-full border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
 const pendingDot = <span className="mr-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 align-middle" />;
 
 type EditingCell = { id: string; key: string };
@@ -208,23 +211,17 @@ export default function SimpleCrudTable({
         {rows && (
           <div className="flex items-center gap-2">
             {saving && <span className="text-xs text-gray-400">처리 중...</span>}
-            <button
-              onClick={handleSaveAll}
-              className="h-9 rounded-lg border border-[#ff4b4b] bg-white px-3.5 text-sm font-medium text-[#ff4b4b] hover:bg-[#fff5f5]"
-            >
+            <button onClick={handleSaveAll} className={toolbarBtnCls}>
+              <i className="fa-solid fa-floppy-disk text-xs" />
               저장{pendingCount > 0 ? ` (${pendingCount})` : ""}
             </button>
-            <button
-              onClick={handleBulkDelete}
-              className="h-9 rounded-lg bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e03e3e]"
-            >
+            <button onClick={handleBulkDelete} className={toolbarBtnCls}>
+              <i className="fa-solid fa-trash text-xs" />
               삭제{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
             </button>
-            <button
-              onClick={handleAddRow}
-              className="h-9 rounded-lg bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e03e3e]"
-            >
-              + 추가
+            <button onClick={handleAddRow} className={toolbarBtnCls}>
+              <i className="fa-solid fa-plus text-xs" />
+              추가
             </button>
           </div>
         )}
@@ -263,24 +260,30 @@ export default function SimpleCrudTable({
                         const known = !draft || opts.some((o) => o.value === draft);
                         return (
                           <td key={c.key} className={tdBase} style={{ ...tdBorder, ...inlineEditShadow }}>
-                            <select
-                              autoFocus
-                              value={draft}
-                              onChange={(e) => commitEdit(row, e.target.value)}
-                              onBlur={() => setEditingCell(null)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Escape") setEditingCell(null);
-                              }}
-                              className={selectEditCls}
-                            >
-                              {c.allowEmpty !== false && <option value="">(없음)</option>}
-                              {!known && <option value={draft}>{draft}</option>}
-                              {opts.map((o) => (
-                                <option key={o.value} value={o.value}>
-                                  {o.label}
-                                </option>
-                              ))}
-                            </select>
+                            <div className="relative min-h-[1lh]">
+                              <span className="invisible">
+                                {isPending && pendingDot}
+                                {opts.find((o) => o.value === getEffectiveValue(row, c.key))?.label ?? getEffectiveValue(row, c.key)}
+                              </span>
+                              <select
+                                autoFocus
+                                value={draft}
+                                onChange={(e) => commitEdit(row, e.target.value)}
+                                onBlur={() => setEditingCell(null)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape") setEditingCell(null);
+                                }}
+                                className={selectEditCls}
+                              >
+                                {c.allowEmpty !== false && <option value="">(없음)</option>}
+                                {!known && <option value={draft}>{draft}</option>}
+                                {opts.map((o) => (
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
                           </td>
                         );
                       }

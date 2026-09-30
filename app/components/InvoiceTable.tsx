@@ -28,7 +28,8 @@ const HEADER_ROW_H = 36;
 const FILTER_ROW_H = 32;
 const thBase = "sticky z-10 px-3 font-semibold whitespace-nowrap text-left text-[13px] text-gray-600 bg-gray-100";
 const thSortable = `${thBase} group cursor-pointer select-none hover:bg-gray-200/70`;
-const thGroup = "sticky top-0 z-10 h-9 px-3 text-center text-[13px] font-semibold text-gray-700 bg-[#ff4b4b]/15";
+// Opaque (= #ff4b4b at 15% on white): these cells are sticky, so rows scroll underneath them.
+const thGroup = "sticky top-0 z-10 h-9 px-3 text-center text-[13px] font-semibold text-gray-700 bg-[#ffe4e4]";
 const tdBase = "px-2.5 py-1.5 whitespace-nowrap text-[13px] text-gray-700";
 const checkboxCls = "h-4 w-4 cursor-pointer rounded border-gray-300 accent-[#ff4b4b]";
 // Toolbar buttons share one look: outlined, Font Awesome icon + label, brand colour on hover.
@@ -351,11 +352,53 @@ export default function InvoiceTable({
   const allColumns = sections.flatMap((s) => s.columns);
   const totalCols = 1 + sections.reduce((sum, s) => sum + s.columns.length, 0); // +1 checkbox col
 
-  // Frozen panes: the checkbox column plus the leading ungrouped section (SHIPPER … USD) stay
-  // pinned while scrolling sideways. Column widths are content-sized, so each pinned column's
-  // `left` offset is measured from the DOM (index 0 = checkbox, i + 1 = i-th frozen column).
-  const frozenCols = sections[0]?.groupLabel === null ? sections[0].columns : [];
-  const frozenCount = frozenCols.length;
+  // Frozen panes: the checkbox column plus the first `frozenCount` columns stay pinned while
+  // scrolling sideways. The default is the leading ungrouped section (SHIPPER … USD); the pin
+  // button on a column header moves the boundary, remembered per product line in this browser.
+  // Column widths are content-sized, so each pinned column's `left` offset is measured from the
+  // DOM (index 0 = checkbox, i + 1 = i-th frozen column).
+  const frozenStorageKey = `invoiceFrozenCount:${prdLineCd}`;
+  const [frozenSetting, setFrozenSetting] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const saved = window.localStorage.getItem(frozenStorageKey);
+      return saved === null || Number.isNaN(Number(saved)) ? null : Number(saved);
+    } catch {
+      return null;
+    }
+  });
+  const defaultFrozenCount = sections[0]?.groupLabel === null ? sections[0].columns.length : 0;
+  const frozenCount = Math.min(frozenSetting ?? defaultFrozenCount, allColumns.length);
+  const frozenCols = allColumns.slice(0, frozenCount);
+
+  function setFrozenThrough(count: number) {
+    setFrozenSetting(count);
+    try {
+      window.localStorage.setItem(frozenStorageKey, String(count));
+    } catch {
+      // storage unavailable — the choice just won't persist
+    }
+  }
+
+  // Header row 1 cells: a grouped section is one cell spanning its columns; ungrouped columns
+  // show their topLabel (or repeat their label) with equal neighbours ("실" over ETD/ETA) merged.
+  // A cell never straddles the frozen boundary — it is split there so each half can be pinned
+  // (or not) on its own.
+  const topCells: { key: string; label: string; span: number; grouped: boolean; colKey: string }[] = [];
+  {
+    let idx = 0;
+    for (const s of sections) {
+      for (const c of s.columns) {
+        const label = s.groupLabel ?? c.topLabel ?? c.label;
+        const prev = topCells[topCells.length - 1];
+        const sameRun = prev && prev.label === label && prev.grouped === (s.groupLabel !== null) && c !== s.columns[0];
+        if (sameRun && idx !== frozenCount) prev.span++;
+        else topCells.push({ key: c.key, label, span: 1, grouped: s.groupLabel !== null, colKey: c.key });
+        idx++;
+      }
+    }
+  }
+
   const frozenPos = new Map(frozenCols.map((c, i) => [c.key, i + 1]));
   const frozenCellRefs = useRef<(HTMLTableCellElement | null)[]>([]);
   const [frozenLeft, setFrozenLeft] = useState<number[]>([]);
@@ -819,10 +862,8 @@ export default function InvoiceTable({
         <div className="hover-scroll overflow-auto px-2" style={{ maxHeight: "calc(100vh - 280px)" }}>
           <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: "13px" }}>
             <thead>
-              {/* Two header rows, like the source sheets. Row 1: grouped sections show their group
-                  label spanning their sub-columns; ungrouped columns show their topLabel (or
-                  repeat their label), with equal neighbours ("실" over ETD/ETA) merged. Row 2:
-                  every column's own sortable label. */}
+              {/* Two header rows, like the source sheets. Row 1: group / top labels (see topCells).
+                  Row 2: every column's own sortable label. */}
               <tr style={{ height: HEADER_ROW_H }}>
                 <th
                   ref={(el) => {
@@ -834,33 +875,19 @@ export default function InvoiceTable({
                 >
                   <input type="checkbox" className={checkboxCls} checked={allSelected} onChange={() => toggleSelectAll(pageIds)} />
                 </th>
-                {sections.map((s, si) =>
-                  s.groupLabel === null ? (
-                    s.columns.map((c, ci) => {
-                      const top = c.topLabel ?? c.label;
-                      if (ci > 0 && (s.columns[ci - 1].topLabel ?? s.columns[ci - 1].label) === top) return null;
-                      let span = 1;
-                      while (ci + span < s.columns.length && (s.columns[ci + span].topLabel ?? s.columns[ci + span].label) === top) span++;
-                      return (
-                        <th
-                          key={c.key}
-                          colSpan={span}
-                          className={`${thBase} text-center`}
-                          style={{ ...thBorder, top: 0, ...frozen(c.key, "", 20, span).style }}
-                        >
-                          {top}
-                        </th>
-                      );
-                    })
-                  ) : (
-                    <th key={`grp-${si}`} colSpan={s.columns.length} className={thGroup} style={thBorder}>
-                      {s.groupLabel}
-                    </th>
-                  )
-                )}
+                {topCells.map((t) => (
+                  <th
+                    key={t.key}
+                    colSpan={t.span}
+                    className={t.grouped ? thGroup : `${thBase} text-center`}
+                    style={{ ...thBorder, top: 0, ...frozen(t.colKey, "", 20, t.span).style }}
+                  >
+                    {t.label}
+                  </th>
+                ))}
               </tr>
               <tr style={{ height: HEADER_ROW_H }}>
-                {allColumns.map((c) => (
+                {allColumns.map((c, ci) => (
                   <th
                     key={c.key}
                     className={`${thSortable} ${c.align === "right" ? "text-right" : ""}`}
@@ -869,10 +896,24 @@ export default function InvoiceTable({
                       if (!resizingRef.current) handleSort(c.key);
                     }}
                   >
-                    <span className="inline-flex items-center gap-1">
-                      {c.label}
+                    {/* Sort arrow leads the label; the freeze pin sits at the far right so the two
+                        are never next to each other. */}
+                    <div className="flex items-center gap-1">
                       {sortIcon(c.key)}
-                    </span>
+                      {c.label}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFrozenThrough(ci + 1 === frozenCount ? 0 : ci + 1);
+                        }}
+                        className={`ml-auto pl-2 text-[10px] leading-none ${
+                          ci + 1 === frozenCount ? "text-[#ff4b4b]" : "text-gray-300 opacity-0 transition-opacity hover:text-[#ff4b4b] group-hover:opacity-100"
+                        }`}
+                        title={ci + 1 === frozenCount ? "틀고정 해제" : "여기까지 틀고정"}
+                      >
+                        <i className="fa-solid fa-thumbtack" />
+                      </button>
+                    </div>
                     <span
                       onMouseDown={(e) => startResize(e, c.key)}
                       onClick={(e) => e.stopPropagation()}

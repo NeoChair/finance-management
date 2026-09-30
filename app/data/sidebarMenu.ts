@@ -41,8 +41,8 @@ export const sidebarMenu: SidebarMenuItem[] = [
                 "action": "InvoiceMattress",
                 "page": "/Invoice/Mattress/",
                 "icon": "fa-solid fa-file-invoice",
-                "text": "Invoice - Mattress",
-                "text_en": "Invoice - Mattress"
+                "text": "Invoice - Hybrid",
+                "text_en": "Invoice - Hybrid"
             },
             {
                 "action": "InvoiceTYJ",

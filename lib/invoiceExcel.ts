@@ -1,6 +1,6 @@
 import ExcelJS from "exceljs";
 import type { InvoiceRow } from "./invoice";
-import { getImportTarget, getImportValueKind, getInvoiceSections, type InvoiceColumn } from "./invoiceColumns";
+import { getImportTarget, getImportValueKind, getInvoiceSections, type InvoiceColumn, type InvoiceSection } from "./invoiceColumns";
 import type { ImportCell, UploadRow } from "./invoiceImport";
 
 // Download, template and upload all share one sheet layout, mirroring the on-screen table:
@@ -17,6 +17,17 @@ const thinBorder: Partial<ExcelJS.Borders> = {
   right: { style: "thin", color: { argb: "FF9CA3AF" } },
 };
 
+// The sheet has one line per SKU, so it carries an extra SKU-code column right after CONTAINER.
+// It isn't uploadable (SKU lines are edited on screen), so upload just skips it.
+const SKU_COL: InvoiceColumn = { key: "__skuCd", label: "SKU", getValue: () => null };
+
+function withSkuColumn(sections: InvoiceSection[]): InvoiceSection[] {
+  return sections.map((s) => ({
+    ...s,
+    columns: s.columns.flatMap((c) => (c.skuField === "sku" ? [c, SKU_COL] : [c])),
+  }));
+}
+
 function cellForDownload(col: InvoiceColumn, row: InvoiceRow): string | number | null {
   const value = col.getValue(row);
   if (value == null || value === "") return null;
@@ -27,9 +38,32 @@ function cellForDownload(col: InvoiceColumn, row: InvoiceRow): string | number |
   return value;
 }
 
+// Shipment-level money (freight/duty/trucking… amounts): written on a shipment's first SKU line
+// only, so summing the column in Excel doesn't count it once per SKU.
+function isShipmentAmount(col: InvoiceColumn): boolean {
+  const t = col.editTarget;
+  return t !== undefined && t.kind !== "master" && !t.field;
+}
+
+/** One sheet line per SKU. The product Amount/QTY are that SKU's own values, shipment amounts
+ *  sit on the first line only, and everything else repeats on every line so each line can be
+ *  filtered/pivoted on its own. A shipment without SKUs gets a single line. */
+function sheetLines(columns: InvoiceColumn[], row: InvoiceRow): (string | number | null)[][] {
+  if (row.skuDetails.length === 0) return [columns.map((c) => cellForDownload(c, row))];
+  return row.skuDetails.map((sku, i) =>
+    columns.map((c) => {
+      if (c === SKU_COL) return sku.skuCd;
+      if (c.skuField === "qty") return sku.qty;
+      if (c.skuField === "amt") return sku.amt;
+      if (i > 0 && isShipmentAmount(c)) return null;
+      return cellForDownload(c, row);
+    })
+  );
+}
+
 /** Builds the download file; with no rows it's the blank upload template. */
 export async function buildInvoiceWorkbook(prdLineCd: string, rows: InvoiceRow[]): Promise<ExcelJS.Buffer> {
-  const sections = getInvoiceSections(prdLineCd);
+  const sections = withSkuColumn(getInvoiceSections(prdLineCd));
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Sheet1", { views: [{ state: "frozen", ySplit: HEADER_ROWS }] });
 
@@ -73,8 +107,9 @@ export async function buildInvoiceWorkbook(prdLineCd: string, rows: InvoiceRow[]
     }
   }
 
+  const columns = sections.flatMap((s) => s.columns);
   for (const row of rows) {
-    sheet.addRow(sections.flatMap((s) => s.columns.map((c) => cellForDownload(c, row))));
+    for (const line of sheetLines(columns, row)) sheet.addRow(line);
   }
 
   return workbook.xlsx.writeBuffer();
@@ -109,7 +144,6 @@ function headerText(cell: ExcelJS.Cell): string {
 /** Reads an upload file's first sheet into rows keyed by column key. Throws (with a
  *  user-facing message) when the header doesn't match this product line's template. */
 export async function parseInvoiceWorkbook(prdLineCd: string, data: ArrayBuffer): Promise<UploadRow[]> {
-  const sections = getInvoiceSections(prdLineCd);
   const workbook = new ExcelJS.Workbook();
   try {
     await workbook.xlsx.load(data);
@@ -118,6 +152,14 @@ export async function parseInvoiceWorkbook(prdLineCd: string, data: ArrayBuffer)
   }
   const sheet = workbook.worksheets[0];
   if (!sheet) throw new Error("시트가 없는 파일입니다.");
+
+  // Current files have the SKU column after CONTAINER; files made from the older template
+  // don't, so fall back to that layout when the SKU header isn't where it should be.
+  const plain = getInvoiceSections(prdLineCd);
+  const contIdx = plain.flatMap((s) => s.columns).findIndex((c) => c.skuField === "sku");
+  const hasSkuCol =
+    contIdx >= 0 && (headerText(sheet.getCell(2, contIdx + 2)) || headerText(sheet.getCell(1, contIdx + 2))) === SKU_COL.label.toLowerCase();
+  const sections = hasSkuCol ? withSkuColumn(plain) : plain;
 
   const columns: InvoiceColumn[] = [];
   let colNo = 1;

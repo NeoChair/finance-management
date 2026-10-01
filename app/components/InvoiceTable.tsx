@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
 import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
+import ColumnFilterMenu from "./ColumnFilterMenu";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
 
 function formatDate(v: string | null): string {
@@ -37,7 +38,6 @@ function navDir(e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>): MoveDir
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return null;
   const el = e.currentTarget;
   if (el instanceof HTMLSelectElement) return e.key === "ArrowLeft" ? "left" : "right";
-  if (el.type === "date") return null;
   const dir = e.key === "ArrowLeft" ? "left" : "right";
   const start = el.selectionStart ?? 0;
   const end = el.selectionEnd ?? 0;
@@ -48,12 +48,31 @@ function navDir(e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>): MoveDir
 
 // Opening an editor selects its text, so typing replaces it and Delete/Backspace clears it.
 function selectAll(e: { currentTarget: HTMLInputElement }) {
-  if (e.currentTarget.type !== "date") e.currentTarget.select();
+  e.currentTarget.select();
+}
+
+// Dates are stored as YYYYMMDD (shown as yyyy-mm-dd); also rejects impossible ones like 20240231.
+function isValidYmd(v: string): boolean {
+  if (!/^\d{8}$/.test(v)) return false;
+  const y = Number(v.slice(0, 4));
+  const m = Number(v.slice(4, 6));
+  const d = Number(v.slice(6, 8));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+// Date cells (typed freely as yyyy-mm-dd) holding something that isn't a real date, whether
+// typed here or already bad in the DB — highlighted and blocked on save.
+function isInvalidDate(col: InvoiceColumn | undefined, value: string | number | null): boolean {
+  return col?.format === "date" && value != null && value !== "" && !isValidYmd(String(value));
 }
 
 function formatCell(col: InvoiceColumn, value: string | number | null): string {
   if (value == null || value === "") return "";
-  if (col.format === "date") return formatDate(String(value));
+  if (col.format === "date") {
+    const s = String(value);
+    return s.length === 8 ? formatDate(s) : s; // show malformed values as-is rather than blank
+  }
   if (col.label === "QTY" || col.label === "USD") return String(value);
   if (col.align === "right") return Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return String(value);
@@ -67,11 +86,13 @@ function isNumericEdit(col: InvoiceColumn): boolean {
 
 const HEADER_ROW_H = 36;
 const FILTER_ROW_H = 32;
+const SUM_ROW_TOP = HEADER_ROW_H * 2 + FILTER_ROW_H;
 const thBase = "sticky z-10 px-3 font-semibold whitespace-nowrap text-left text-[13px] text-gray-600 bg-gray-100";
 const thSortable = `${thBase} group cursor-pointer select-none hover:bg-gray-200/70`;
 // Opaque (= #ff4b4b at 15% on white): these cells are sticky, so rows scroll underneath them.
 const thGroup = "sticky top-0 z-10 h-9 px-3 text-center text-[13px] font-semibold text-gray-700 bg-[#ffe4e4]";
 const tdBase = "px-2.5 py-1.5 whitespace-nowrap text-[13px] text-gray-700";
+const thSum = "sticky z-10 px-2.5 py-1.5 whitespace-nowrap text-left text-[13px] font-semibold text-gray-700 bg-gray-50";
 const checkboxCls = "h-4 w-4 cursor-pointer rounded border-gray-300 accent-[#ff4b4b]";
 // Toolbar buttons share one look: outlined, Font Awesome icon + label, brand colour on hover.
 const toolbarBtnCls =
@@ -132,7 +153,10 @@ export default function InvoiceTable({
   const [pageSize, setPageSize] = useState(20);
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc" | null>(null);
-  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  // Excel-style filters: the display values each column may show; a missing key = no filter.
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
+  const [filterMenu, setFilterMenu] = useState<{ colKey: string; anchor: DOMRect } | null>(null);
+  const closeFilterMenu = useCallback(() => setFilterMenu(null), []);
   // Dropdown values for the Shipper/Sender/Receiver/Buyer/Seller columns: whatever is already
   // stored in that same DB column (see getPartyOptions), keyed by optionKey(editTarget).
   const [partyOptions, setPartyOptions] = useState<Record<string, string[]>>({});
@@ -248,7 +272,8 @@ export default function InvoiceTable({
     editingKeyRef.current = `${row.shpmId}:${col.key}`;
     setEditingCell({ shpmId: row.shpmId, colKey: col.key });
     const raw = getEffectiveValue(col, row);
-    const initial = col.format === "date" ? formatDate(raw as string | null) : raw == null ? "" : String(raw);
+    // Dates open as yyyy-mm-dd; a malformed stored value opens as-is so it can be fixed in place.
+    const initial = raw == null ? "" : col.format === "date" ? formatCell(col, raw) : String(raw);
     draftStartRef.current = initial;
     setDraft(initial);
   }
@@ -271,7 +296,8 @@ export default function InvoiceTable({
     if (picked !== undefined) {
       value = picked === "" ? null : picked;
     } else if (col.format === "date") {
-      value = draft ? draft.replaceAll("-", "") : null;
+      // "2024-01-05" → "20240105"; anything else is kept as typed and flagged by isInvalidDate.
+      value = draft.trim() ? draft.trim().replaceAll("-", "") : null;
     } else if (isNumericEdit(col)) {
       if (draft !== "" && isNaN(Number(draft))) return; // half-typed like "-" → keep the old value
       value = draft === "" ? null : Number(draft);
@@ -397,6 +423,13 @@ export default function InvoiceTable({
     const skuEdits = Object.values(pendingSkuEdits);
     if (cellEdits.length === 0 && skuEdits.length === 0) {
       alert("저장할 변경사항이 없습니다.");
+      return;
+    }
+    const badDates = Object.entries(pendingCellEdits).filter(([key, e]) =>
+      isInvalidDate(allColumns.find((c) => c.key === key.slice(key.indexOf(":") + 1)), e.value)
+    );
+    if (badDates.length > 0) {
+      alert(`유효하지 않은 날짜 형식이 ${badDates.length}건 있습니다.\nyyyy-mm-dd 형식으로 수정한 뒤 다시 저장해 주세요.`);
       return;
     }
     setSaving(true);
@@ -679,7 +712,7 @@ export default function InvoiceTable({
   const rowBg = "bg-white group-hover/row:bg-gray-50";
   const subRowBg = "bg-gray-50";
   const pendingCount = Object.keys(pendingCellEdits).length + Object.keys(pendingSkuEdits).length;
-  const activeFilterCount = Object.values(columnFilters).filter((v) => v).length;
+  const activeFilterCount = Object.keys(columnFilters).length;
 
   function handleSort(colKey: string) {
     if (sortKey !== colKey) {
@@ -705,15 +738,28 @@ export default function InvoiceTable({
     return <i className="fa-solid fa-sort text-[10px] text-gray-300 opacity-0 transition-opacity group-hover:opacity-100" />;
   }
 
-  const filteredRows =
-    rows?.filter((r) =>
-      Object.entries(columnFilters).every(([key, filterVal]) => {
-        if (!filterVal) return true;
-        const col = allColumns.find((c) => c.key === key);
-        if (!col) return true;
-        return formatCell(col, getEffectiveValue(col, r)).toLowerCase().includes(filterVal.toLowerCase());
-      })
-    ) ?? null;
+  const activeFilters = Object.entries(columnFilters).flatMap(([key, allowed]) => {
+    const col = allColumns.find((c) => c.key === key);
+    return col ? [{ key, col, allowed: new Set(allowed) }] : [];
+  });
+
+  // `exceptKey` skips one column's own filter, so its dropdown lists the values still reachable
+  // under the other filters (as Excel does) while keeping its own unticked values listed.
+  function passesFilters(r: InvoiceRow, exceptKey?: string) {
+    return activeFilters.every(({ key, col, allowed }) => key === exceptKey || allowed.has(formatCell(col, getEffectiveValue(col, r))));
+  }
+
+  const filteredRows = rows?.filter((r) => passesFilters(r)) ?? null;
+
+  function filterValues(col: InvoiceColumn): string[] {
+    const set = new Set<string>();
+    for (const r of rows ?? []) if (passesFilters(r, col.key)) set.add(formatCell(col, getEffectiveValue(col, r)));
+    const numeric = col.align === "right" && col.format !== "date";
+    return [...set].sort((a, b) => {
+      if (!a || !b) return a ? -1 : b ? 1 : 0; // blanks last
+      return numeric ? Number(a.replaceAll(",", "")) - Number(b.replaceAll(",", "")) : a.localeCompare(b, "ko", { numeric: true });
+    });
+  }
 
   const sortedRows = filteredRows
     ? [...filteredRows].sort((a, b) => {
@@ -763,9 +809,11 @@ export default function InvoiceTable({
     URL.revokeObjectURL(url);
   }
 
+  // Ticked rows only; nothing ticked = every row the filters leave, in the on-screen order.
   async function handleDownload() {
-    if (!rows) return;
-    await saveWorkbook(rows, fileName);
+    if (!rows || !sortedRows) return;
+    const picked = rows.filter((r) => selectedIds.has(r.shpmId));
+    await saveWorkbook(picked.length > 0 ? picked : sortedRows, fileName);
   }
 
   async function handleTemplateDownload() {
@@ -882,10 +930,11 @@ export default function InvoiceTable({
         <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
           <input
             autoFocus
-            // Numbers use a text input (filtered to numeric chars) so the caret position is
-            // readable for Left/Right navigation and Up/Down don't step the value.
-            type={col.format === "date" ? "date" : "text"}
+            // Plain text inputs throughout: dates are typed as yyyy-mm-dd (no picker), numbers are
+            // filtered to numeric chars, and the caret stays readable for Left/Right navigation.
+            type="text"
             inputMode={isNumericEdit(col) ? "decimal" : undefined}
+            placeholder={col.format === "date" ? "yyyy-mm-dd" : undefined}
             value={draft}
             onChange={(e) => {
               if (!isNumericEdit(col) || NUMERIC_DRAFT.test(e.target.value)) setDraft(e.target.value);
@@ -912,10 +961,18 @@ export default function InvoiceTable({
       );
     }
 
+    const value = getEffectiveValue(col, row);
+    const badDate = isInvalidDate(col, value);
     return (
-      <td key={col.key} className={`${cellCls} ${fz.cls}`} style={{ ...tdBorder, ...fz.style }} onClick={() => startEdit(col, row)}>
+      <td
+        key={col.key}
+        className={`${cellCls} ${fz.cls}`}
+        style={{ ...tdBorder, ...fz.style, ...(badDate ? { backgroundColor: "#fee2e2" } : null) }}
+        title={badDate ? "유효하지 않은 날짜 형식입니다 (yyyy-mm-dd)" : undefined}
+        onClick={() => startEdit(col, row)}
+      >
         {isPending && pendingDot}
-        {formatCell(col, getEffectiveValue(col, row))}
+        {formatCell(col, value)}
       </td>
     );
   }
@@ -1035,7 +1092,11 @@ export default function InvoiceTable({
             </button>
             <button onClick={handleDownload} className={toolbarBtnCls}>
               <i className="fa-solid fa-download text-xs" />
-              엑셀 내려받기
+              {selectedIds.size > 0
+                ? `선택 내려받기 (${selectedIds.size})`
+                : activeFilterCount > 0
+                  ? `필터 결과 내려받기 (${sortedRows?.length ?? 0})`
+                  : "엑셀 내려받기"}
             </button>
             <div className="relative">
               <button onClick={() => setUploadMenuOpen((open) => !open)} className={toolbarBtnCls}>
@@ -1161,16 +1222,38 @@ export default function InvoiceTable({
                     className={thBase}
                     style={{ ...thBorder, top: HEADER_ROW_H * 2, padding: "4px 8px", ...frozen(c.key, "", 20).style }}
                   >
-                    <input
-                      value={columnFilters[c.key] ?? ""}
-                      onChange={(e) => {
-                        setColumnFilters((prev) => ({ ...prev, [c.key]: e.target.value }));
-                        setPage(1);
+                    <button
+                      data-filter-anchor
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const anchor = e.currentTarget.getBoundingClientRect();
+                        setFilterMenu((prev) => (prev?.colKey === c.key ? null : { colKey: c.key, anchor }));
                       }}
-                      placeholder="필터"
-                      className="h-6 w-full min-w-[70px] rounded-md border border-gray-200 bg-gray-50/70 px-1.5 text-[11px] font-normal text-gray-500 outline-none focus:border-[#ff4b4b] focus:bg-white"
-                      onClick={(e) => e.stopPropagation()}
-                    />
+                      className={`flex h-6 w-full min-w-[70px] items-center justify-between gap-1 rounded-md border px-1.5 text-[11px] font-normal outline-none ${
+                        columnFilters[c.key]
+                          ? "border-[#ff4b4b]/50 bg-[#ff4b4b]/5 text-[#ff4b4b]"
+                          : "border-gray-200 bg-gray-50/70 text-gray-400 hover:border-gray-300"
+                      }`}
+                      title={columnFilters[c.key]?.map((v) => v || "(빈 셀)").join(", ")}
+                    >
+                      <span className="truncate">{columnFilters[c.key] ? `${columnFilters[c.key].length}개 선택` : "전체"}</span>
+                      <i className={`fa-solid ${columnFilters[c.key] ? "fa-filter" : "fa-caret-down"} text-[9px]`} />
+                    </button>
+                  </th>
+                ))}
+              </tr>
+              {/* Totals of the filtered rows, pinned under the filters so they stay in view. */}
+              <tr>
+                <th className={thSum} style={{ ...thBorder, top: SUM_ROW_TOP, ...frozen(null, "", 20).style }}>
+                  합계
+                </th>
+                {allColumns.map((c) => (
+                  <th
+                    key={c.key}
+                    className={`${thSum} ${c.align === "right" ? "text-right" : ""}`}
+                    style={{ ...thBorder, top: SUM_ROW_TOP, ...frozen(c.key, "", 20).style }}
+                  >
+                    {c.align === "right" && c.format !== "date" ? formatCell(c, sumColumn(c)) : ""}
                   </th>
                 ))}
               </tr>
@@ -1253,22 +1336,6 @@ export default function InvoiceTable({
                 );
               })}
             </tbody>
-            <tfoot>
-              <tr className="sticky bottom-0 z-10 border-t-2 border-gray-200 bg-gray-50/95 font-semibold text-gray-700">
-                <td className={`${tdBase} ${frozen(null, subRowBg).cls}`} style={{ ...tdBorder, ...frozen(null, subRowBg).style }}>
-                  합계
-                </td>
-                {allColumns.map((c) => (
-                  <td
-                    key={c.key}
-                    className={`${tdBase} ${c.align === "right" ? "text-right" : ""} ${frozen(c.key, subRowBg).cls}`}
-                    style={{ ...tdBorder, ...frozen(c.key, subRowBg).style }}
-                  >
-                    {c.align === "right" && c.format !== "date" ? formatCell(c, sumColumn(c)) : ""}
-                  </td>
-                ))}
-              </tr>
-            </tfoot>
           </table>
         </div>
       )}
@@ -1316,6 +1383,31 @@ export default function InvoiceTable({
           </div>
         </div>
       )}
+
+      {filterMenu &&
+        (() => {
+          const col = allColumns.find((c) => c.key === filterMenu.colKey);
+          if (!col) return null;
+          return (
+            <ColumnFilterMenu
+              key={col.key}
+              anchor={filterMenu.anchor}
+              values={filterValues(col)}
+              selected={columnFilters[col.key] ?? null}
+              onApply={(picked) => {
+                setColumnFilters((prev) => {
+                  const next = { ...prev };
+                  if (picked) next[col.key] = picked;
+                  else delete next[col.key];
+                  return next;
+                });
+                setPage(1);
+                setFilterMenu(null);
+              }}
+              onClose={closeFilterMenu}
+            />
+          );
+        })()}
     </div>
   );
 }

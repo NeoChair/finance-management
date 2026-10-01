@@ -75,6 +75,7 @@ export function buildShipmentImports(prdLineCd: string, rows: UploadRow[]): { im
   const imports: ShipmentImport[] = [];
   const errors: string[] = [];
   const seenKeys = new Map<string, number>();
+  let prev: { key: string; contNo: string } | null = null; // the last shipment's first line
 
   for (const row of rows) {
     const item: ShipmentImport = { rowNo: row.rowNo, master: {}, parties: [], costs: [] };
@@ -116,6 +117,17 @@ export function buildShipmentImports(prdLineCd: string, rows: UploadRow[]): { im
       continue;
     }
     const key = [item.master.hblNo, item.master.mblNo, item.master.contNo].map((v) => String(v ?? "").toUpperCase()).join("|");
+
+    // The download has one line per SKU; the shipment is read from its first line and the SKU
+    // lines right below it are skipped. Those lines repeat the H-BL/M-BL/CONTAINER — or, in files
+    // from the earlier first-line-only download, carry nothing but the CONTAINER.
+    const contNo = String(item.master.contNo).toUpperCase();
+    const isSkuLine =
+      prev !== null &&
+      (key === prev.key || (contNo === prev.contNo && Object.keys(item.master).length === 1 && legs.size === 0));
+    if (!isSkuLine) prev = { key, contNo };
+    if (isSkuLine) continue;
+
     const dupRow = seenKeys.get(key);
     if (dupRow != null) {
       errors.push(`${row.rowNo}행: ${dupRow}행과 H-BL/M-BL/CONTAINER가 같습니다.`);

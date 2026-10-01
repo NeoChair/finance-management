@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
 import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
@@ -17,6 +17,38 @@ function sameValue(a: string | number | null, b: string | number | null): boolea
   const sb = b == null ? "" : String(b);
   if (sa === sb) return true;
   return sa !== "" && sb !== "" && !isNaN(Number(sa)) && !isNaN(Number(sb)) && Number(sa) === Number(sb);
+}
+
+// Partial numbers allowed while typing ("-", "1.", ".5"); commitEdit converts with Number().
+const NUMERIC_DRAFT = /^-?\d*\.?\d*$/;
+
+type MoveDir ="next" | "prev" | "up" | "down" | "left" | "right";
+
+// Which cell to move to for a key pressed inside an inline editor, or null to let the key act
+// normally. Enter goes down (Shift+Enter up). Left/Right leave a text field while its whole text
+// is still selected (as it is right after opening) or the caret is at that edge, so once you
+// click into the text they move the caret; date fields keep Left/Right for their own segments.
+function navDir(e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>): MoveDir | null {
+  if (e.key === "Tab") return e.shiftKey ? "prev" : "next";
+  if (e.altKey || e.ctrlKey || e.metaKey) return null;
+  if (e.key === "Enter") return e.shiftKey ? "up" : "down";
+  if (e.key === "ArrowUp") return "up";
+  if (e.key === "ArrowDown") return "down";
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return null;
+  const el = e.currentTarget;
+  if (el instanceof HTMLSelectElement) return e.key === "ArrowLeft" ? "left" : "right";
+  if (el.type === "date") return null;
+  const dir = e.key === "ArrowLeft" ? "left" : "right";
+  const start = el.selectionStart ?? 0;
+  const end = el.selectionEnd ?? 0;
+  if (start === 0 && end === el.value.length) return dir;
+  if (start !== end) return null;
+  return (dir === "left" ? start === 0 : end === el.value.length) ? dir : null;
+}
+
+// Opening an editor selects its text, so typing replaces it and Delete/Backspace clears it.
+function selectAll(e: { currentTarget: HTMLInputElement }) {
+  if (e.currentTarget.type !== "date") e.currentTarget.select();
 }
 
 function formatCell(col: InvoiceColumn, value: string | number | null): string {
@@ -109,6 +141,15 @@ export default function InvoiceTable({
   // Mirrors manualEntry synchronously: the select's blur can fire in the same tick it's swapped
   // out for the text input, before the state update is visible to that handler.
   const manualEntryRef = useRef(false);
+  // "shpmId:colKey" / "shpmDtlId:field" of the editor that's open right now, updated
+  // synchronously so a stale blur from an editor we already moved away from can be ignored.
+  const editingKeyRef = useRef<string | null>(null);
+  const editingSkuKeyRef = useRef<string | null>(null);
+  // The draft each editor opened with — Ctrl+Z only undoes the table while it's unchanged.
+  const draftStartRef = useRef("");
+  const skuDraftStartRef = useRef("");
+  const historyRef = useRef<{ cell: Record<string, PendingCellEdit>; sku: Record<string, PendingSkuEdit> }[]>([]);
+  const undoRef = useRef<() => void>(() => {});
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -149,6 +190,21 @@ export default function InvoiceTable({
     load();
   }, [load]);
 
+  // Ctrl+Z with no editor focused undoes the last unsaved cell change. Inside filter inputs and
+  // the like, the browser's own text undo is left alone.
+  useEffect(() => {
+    function onKey(e: globalThis.KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== "z") return;
+      const t = e.target as HTMLElement | null;
+      const isTextField = t instanceof HTMLInputElement ? t.type !== "checkbox" : t?.tagName === "TEXTAREA" || t?.tagName === "SELECT" || !!t?.isContentEditable;
+      if (isTextField) return;
+      e.preventDefault();
+      undoRef.current();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   function getEffectiveValue(col: InvoiceColumn, row: InvoiceRow): string | number | null {
     const pending = pendingCellEdits[`${row.shpmId}:${col.key}`];
     return pending ? pending.value : col.getValue(row);
@@ -160,21 +216,55 @@ export default function InvoiceTable({
     return field === "skuCd" ? sku.skuCd : field === "qty" ? sku.qty : field === "unitPrc" ? sku.unitPrc : sku.amt;
   }
 
+  // Snapshot of both pending maps before each change, for Ctrl+Z. Cleared on save / row delete,
+  // since restoring edits for rows that no longer exist (or were already saved) would be wrong.
+  function recordHistory() {
+    historyRef.current.push({ cell: pendingCellEdits, sku: pendingSkuEdits });
+    if (historyRef.current.length > 100) historyRef.current.shift();
+  }
+
+  function undo() {
+    const prev = historyRef.current.pop();
+    if (!prev) return;
+    cancelEdit();
+    cancelEditSku();
+    setPendingCellEdits(prev.cell);
+    setPendingSkuEdits(prev.sku);
+  }
+  useEffect(() => {
+    undoRef.current = undo;
+  });
+
+  // Ctrl+Z inside an editor undoes the table only when nothing has been typed in it yet —
+  // otherwise the browser's own text undo applies.
+  function isTableUndo(e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>, untouched: boolean) {
+    return (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && untouched;
+  }
+
   function startEdit(col: InvoiceColumn, row: InvoiceRow) {
     if (!col.editTarget) return;
     manualEntryRef.current = false;
     setManualEntry(false);
+    editingKeyRef.current = `${row.shpmId}:${col.key}`;
     setEditingCell({ shpmId: row.shpmId, colKey: col.key });
     const raw = getEffectiveValue(col, row);
-    setDraft(col.format === "date" ? formatDate(raw as string | null) : raw == null ? "" : String(raw));
+    const initial = col.format === "date" ? formatDate(raw as string | null) : raw == null ? "" : String(raw);
+    draftStartRef.current = initial;
+    setDraft(initial);
+  }
+
+  function cancelEdit() {
+    editingKeyRef.current = null;
+    setEditingCell(null);
   }
 
   // `picked` is passed by the dropdown, which commits on change rather than on blur.
   function commitEdit(col: InvoiceColumn, row: InvoiceRow, picked?: string) {
     const target = col.editTarget;
-    // Only close the editor if it's still this cell — after Tab moves to the next cell, the old
-    // input's late blur must not cancel the new edit.
-    setEditingCell((prev) => (prev?.shpmId === row.shpmId && prev.colKey === col.key ? null : prev));
+    // A blur that arrives after Tab/Enter/arrows already committed and moved on (or after Esc
+    // cancelled) belongs to an editor that's gone — ignore it.
+    if (editingKeyRef.current !== `${row.shpmId}:${col.key}`) return;
+    cancelEdit();
     if (!target) return;
 
     let value: string | number | null;
@@ -183,6 +273,7 @@ export default function InvoiceTable({
     } else if (col.format === "date") {
       value = draft ? draft.replaceAll("-", "") : null;
     } else if (isNumericEdit(col)) {
+      if (draft !== "" && isNaN(Number(draft))) return; // half-typed like "-" → keep the old value
       value = draft === "" ? null : Number(draft);
     } else {
       value = draft === "" ? null : draft;
@@ -191,32 +282,33 @@ export default function InvoiceTable({
     const key = `${row.shpmId}:${col.key}`;
     // Back to the original value → drop the pending edit instead of marking it changed.
     if (sameValue(value, col.getValue(row))) {
-      setPendingCellEdits((prev) => {
-        if (!(key in prev)) return prev;
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
+      if (!(key in pendingCellEdits)) return;
+      recordHistory();
+      const next = { ...pendingCellEdits };
+      delete next[key];
+      setPendingCellEdits(next);
       return;
     }
-    setPendingCellEdits((prev) => ({ ...prev, [key]: { shpmId: row.shpmId, editTarget: target, value } }));
+    if (key in pendingCellEdits && sameValue(pendingCellEdits[key].value, value)) return;
+    recordHistory();
+    setPendingCellEdits({ ...pendingCellEdits, [key]: { shpmId: row.shpmId, editTarget: target, value } });
   }
 
-  // Tab / Shift+Tab: jump to the next/previous editable cell like a spreadsheet, wrapping to the
-  // neighbouring row at the ends, instead of letting the browser focus the row checkbox.
-  function moveEdit(col: InvoiceColumn, row: InvoiceRow, back: boolean) {
+  // Spreadsheet-style navigation between editable cells. Tab / Shift+Tab ("next"/"prev") wrap to
+  // the neighbouring row at the ends; arrow keys stop at the table edge.
+  function moveEdit(col: InvoiceColumn, row: InvoiceRow, dir: MoveDir) {
     if (!pagedRows) return;
     const editable = allColumns.filter((c) => c.editTarget);
     let ci = editable.findIndex((c) => c.key === col.key);
     let ri = pagedRows.findIndex((r) => r.shpmId === row.shpmId);
     if (ci < 0 || ri < 0) return;
-    ci += back ? -1 : 1;
-    if (ci >= editable.length) {
-      ci = 0;
-      ri++;
-    } else if (ci < 0) {
-      ci = editable.length - 1;
-      ri--;
+    if (dir === "up") ri--;
+    else if (dir === "down") ri++;
+    else ci += dir === "prev" || dir === "left" ? -1 : 1;
+    if (ci >= editable.length || ci < 0) {
+      if (dir !== "next" && dir !== "prev") return;
+      ci = ci < 0 ? editable.length - 1 : 0;
+      ri += dir === "prev" ? -1 : 1;
     }
     if (ri < 0 || ri >= pagedRows.length) return;
     startEdit(editable[ci], pagedRows[ri]);
@@ -251,6 +343,7 @@ export default function InvoiceTable({
   }
 
   function clearPendingForShpmIds(ids: Set<number>) {
+    historyRef.current = [];
     setPendingCellEdits((prev) => {
       const next = { ...prev };
       for (const key of Object.keys(next)) if (ids.has(next[key].shpmId)) delete next[key];
@@ -334,6 +427,7 @@ export default function InvoiceTable({
       if (failed.length > 0) alert(`${failed.length}건 저장에 실패했습니다.`);
       setPendingCellEdits({});
       setPendingSkuEdits({});
+      historyRef.current = [];
       await load();
       loadPartyOptions(); // a newly typed name becomes a choice from now on
     } finally {
@@ -341,28 +435,64 @@ export default function InvoiceTable({
     }
   }
 
+  function openSkuEditor(shpmDtlId: number, field: SkuField, initial: string) {
+    editingSkuKeyRef.current = `${shpmDtlId}:${field}`;
+    setEditingSku({ shpmDtlId, field });
+    skuDraftStartRef.current = initial;
+    setSkuDraft(initial);
+  }
+
   function startEditSku(sku: InvoiceSku, field: SkuField) {
-    setEditingSku({ shpmDtlId: sku.shpmDtlId, field });
     const raw = getEffectiveSkuValue(sku, field);
-    setSkuDraft(raw == null ? "" : String(raw));
+    openSkuEditor(sku.shpmDtlId, field, raw == null ? "" : String(raw));
+  }
+
+  function cancelEditSku() {
+    editingSkuKeyRef.current = null;
+    setEditingSku(null);
   }
 
   function commitEditSku(shpmId: number, shpmDtlId: number, field: SkuField) {
-    setEditingSku(null);
-    const value: string | number | null = skuDraft === "" ? null : field === "skuCd" ? skuDraft : Number(skuDraft);
     const key = `${shpmDtlId}:${field}`;
+    if (editingSkuKeyRef.current !== key) return; // stale blur, see commitEdit
+    cancelEditSku();
+    if (field !== "skuCd" && skuDraft !== "" && isNaN(Number(skuDraft))) return; // half-typed number
+    const value: string | number | null = skuDraft === "" ? null : field === "skuCd" ? skuDraft : Number(skuDraft);
     const sku = rows?.find((r) => r.shpmId === shpmId)?.skuDetails.find((s) => s.shpmDtlId === shpmDtlId);
     const original = !sku ? undefined : field === "skuCd" ? sku.skuCd : field === "qty" ? sku.qty : field === "unitPrc" ? sku.unitPrc : sku.amt;
     if (original !== undefined && sameValue(value, original)) {
-      setPendingSkuEdits((prev) => {
-        if (!(key in prev)) return prev;
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
+      if (!(key in pendingSkuEdits)) return;
+      recordHistory();
+      const next = { ...pendingSkuEdits };
+      delete next[key];
+      setPendingSkuEdits(next);
       return;
     }
-    setPendingSkuEdits((prev) => ({ ...prev, [key]: { shpmId, shpmDtlId, field, value } }));
+    if (key in pendingSkuEdits && sameValue(pendingSkuEdits[key].value, value)) return;
+    recordHistory();
+    setPendingSkuEdits({ ...pendingSkuEdits, [key]: { shpmId, shpmDtlId, field, value } });
+  }
+
+  // Same navigation as moveEdit, within one shipment's SKU rows (SKU code / QTY / Amount columns).
+  function moveEditSku(shpmId: number, shpmDtlId: number, field: SkuField, dir: MoveDir) {
+    const skus = rows?.find((r) => r.shpmId === shpmId)?.skuDetails;
+    if (!skus) return;
+    const fields = allColumns.flatMap((c): SkuField[] =>
+      c.skuField === "sku" ? ["skuCd"] : c.skuField === "qty" || c.skuField === "amt" ? [c.skuField] : []
+    );
+    let ci = fields.indexOf(field);
+    let ri = skus.findIndex((s) => s.shpmDtlId === shpmDtlId);
+    if (ci < 0 || ri < 0) return;
+    if (dir === "up") ri--;
+    else if (dir === "down") ri++;
+    else ci += dir === "prev" || dir === "left" ? -1 : 1;
+    if (ci >= fields.length || ci < 0) {
+      if (dir !== "next" && dir !== "prev") return;
+      ci = ci < 0 ? fields.length - 1 : 0;
+      ri += dir === "prev" ? -1 : 1;
+    }
+    if (ri < 0 || ri >= skus.length) return;
+    startEditSku(skus[ri], fields[ci]);
   }
 
   async function handleAddSku(shpmId: number) {
@@ -376,8 +506,7 @@ export default function InvoiceTable({
       }
       await load();
       if (typeof data.shpmDtlId === "number") {
-        setEditingSku({ shpmDtlId: data.shpmDtlId, field: "skuCd" });
-        setSkuDraft("");
+        openSkuEditor(data.shpmDtlId, "skuCd", "");
       }
     } finally {
       setSaving(false);
@@ -392,6 +521,7 @@ export default function InvoiceTable({
       alert(data.message ?? "삭제 실패");
       return;
     }
+    historyRef.current = [];
     setPendingSkuEdits((prev) => {
       const next = { ...prev };
       for (const key of Object.keys(next)) if (next[key].shpmDtlId === sku.shpmDtlId) delete next[key];
@@ -710,14 +840,25 @@ export default function InvoiceTable({
               }
             }}
             onBlur={() => {
-              if (!manualEntryRef.current)
-                setEditingCell((prev) => (prev?.shpmId === row.shpmId && prev.colKey === col.key ? null : prev));
+              if (!manualEntryRef.current && editingKeyRef.current === `${row.shpmId}:${col.key}`) cancelEdit();
             }}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setEditingCell(null);
-              if (e.key === "Tab") {
+              if (e.key === "Escape") cancelEdit();
+              if (isTableUndo(e, true)) {
                 e.preventDefault();
-                moveEdit(col, row, e.shiftKey);
+                undo();
+                return;
+              }
+              if (e.key === "Delete" || e.key === "Backspace") {
+                e.preventDefault();
+                commitEdit(col, row, "");
+                return;
+              }
+              // Arrows would otherwise change (and commit) the selected option; Alt+↓ still opens it.
+              const dir = navDir(e);
+              if (dir) {
+                e.preventDefault();
+                moveEdit(col, row, dir);
               }
             }}
             className={selectEditCls}
@@ -741,18 +882,28 @@ export default function InvoiceTable({
         <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
           <input
             autoFocus
-            type={col.format === "date" ? "date" : isNumericEdit(col) ? "number" : "text"}
-            step={isNumericEdit(col) ? "0.01" : undefined}
+            // Numbers use a text input (filtered to numeric chars) so the caret position is
+            // readable for Left/Right navigation and Up/Down don't step the value.
+            type={col.format === "date" ? "date" : "text"}
+            inputMode={isNumericEdit(col) ? "decimal" : undefined}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              if (!isNumericEdit(col) || NUMERIC_DRAFT.test(e.target.value)) setDraft(e.target.value);
+            }}
+            onFocus={selectAll}
             onBlur={() => commitEdit(col, row)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              if (e.key === "Escape") setEditingCell(null);
-              if (e.key === "Tab") {
+              if (e.key === "Escape") cancelEdit();
+              if (isTableUndo(e, draft === draftStartRef.current)) {
+                e.preventDefault();
+                undo();
+                return;
+              }
+              const dir = navDir(e);
+              if (dir) {
                 e.preventDefault();
                 commitEdit(col, row);
-                moveEdit(col, row, e.shiftKey);
+                moveEdit(col, row, dir);
               }
             }}
             className={`${inlineEditCls} ${col.align === "right" ? "text-right" : ""}`}
@@ -773,14 +924,27 @@ export default function InvoiceTable({
     return (
       <input
         autoFocus
-        type={field === "skuCd" ? "text" : "number"}
-        step={field === "skuCd" ? undefined : field === "qty" ? "1" : "0.01"}
+        type="text"
+        inputMode={field === "skuCd" ? undefined : "decimal"}
         value={skuDraft}
-        onChange={(e) => setSkuDraft(e.target.value)}
+        onChange={(e) => {
+          if (field === "skuCd" || NUMERIC_DRAFT.test(e.target.value)) setSkuDraft(e.target.value);
+        }}
+        onFocus={selectAll}
         onBlur={() => commitEditSku(shpmId, shpmDtlId, field)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          if (e.key === "Escape") setEditingSku(null);
+          if (e.key === "Escape") cancelEditSku();
+          if (isTableUndo(e, skuDraft === skuDraftStartRef.current)) {
+            e.preventDefault();
+            undo();
+            return;
+          }
+          const dir = navDir(e);
+          if (dir) {
+            e.preventDefault();
+            commitEditSku(shpmId, shpmDtlId, field);
+            moveEditSku(shpmId, shpmDtlId, field, dir);
+          }
         }}
         style={inlineEditShadow}
         className={cls}
@@ -1042,7 +1206,7 @@ export default function InvoiceTable({
                                     onBlur={() => commitEdit({ ...c, editTarget: { kind: "master", field: "contNo" } }, r)}
                                     onKeyDown={(e) => {
                                       if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                      if (e.key === "Escape") setEditingCell(null);
+                                      if (e.key === "Escape") cancelEdit();
                                     }}
                                     style={inlineEditShadow}
                                     className={inlineEditCls}

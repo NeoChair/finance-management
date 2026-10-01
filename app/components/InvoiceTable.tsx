@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
 import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
@@ -17,6 +17,27 @@ function sameValue(a: string | number | null, b: string | number | null): boolea
   const sb = b == null ? "" : String(b);
   if (sa === sb) return true;
   return sa !== "" && sb !== "" && !isNaN(Number(sa)) && !isNaN(Number(sb)) && Number(sa) === Number(sb);
+}
+
+// Partial numbers allowed while typing ("-", "1.", ".5"); commitEdit converts with Number().
+const NUMERIC_DRAFT = /^-?\d*\.?\d*$/;
+
+type MoveDir ="next" | "prev" | "up" | "down" | "left" | "right";
+
+// Which cell to move to for a key pressed inside an inline editor, or null to let the key act
+// normally. Left/Right only leave a text field when the caret is already at that edge, so they
+// still move the caret while typing; date fields keep Left/Right for their own segments.
+function navDir(e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>): MoveDir | null {
+  if (e.key === "Tab") return e.shiftKey ? "prev" : "next";
+  if (e.altKey || e.ctrlKey || e.metaKey) return null;
+  if (e.key === "ArrowUp") return "up";
+  if (e.key === "ArrowDown") return "down";
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return null;
+  const el = e.currentTarget;
+  if (el instanceof HTMLSelectElement) return e.key === "ArrowLeft" ? "left" : "right";
+  if (el.type === "date" || el.selectionStart !== el.selectionEnd) return null;
+  if (e.key === "ArrowLeft") return el.selectionStart === 0 ? "left" : null;
+  return el.selectionEnd === el.value.length ? "right" : null;
 }
 
 function formatCell(col: InvoiceColumn, value: string | number | null): string {
@@ -183,6 +204,7 @@ export default function InvoiceTable({
     } else if (col.format === "date") {
       value = draft ? draft.replaceAll("-", "") : null;
     } else if (isNumericEdit(col)) {
+      if (draft !== "" && isNaN(Number(draft))) return; // half-typed like "-" → keep the old value
       value = draft === "" ? null : Number(draft);
     } else {
       value = draft === "" ? null : draft;
@@ -202,21 +224,21 @@ export default function InvoiceTable({
     setPendingCellEdits((prev) => ({ ...prev, [key]: { shpmId: row.shpmId, editTarget: target, value } }));
   }
 
-  // Tab / Shift+Tab: jump to the next/previous editable cell like a spreadsheet, wrapping to the
-  // neighbouring row at the ends, instead of letting the browser focus the row checkbox.
-  function moveEdit(col: InvoiceColumn, row: InvoiceRow, back: boolean) {
+  // Spreadsheet-style navigation between editable cells. Tab / Shift+Tab ("next"/"prev") wrap to
+  // the neighbouring row at the ends; arrow keys stop at the table edge.
+  function moveEdit(col: InvoiceColumn, row: InvoiceRow, dir: MoveDir) {
     if (!pagedRows) return;
     const editable = allColumns.filter((c) => c.editTarget);
     let ci = editable.findIndex((c) => c.key === col.key);
     let ri = pagedRows.findIndex((r) => r.shpmId === row.shpmId);
     if (ci < 0 || ri < 0) return;
-    ci += back ? -1 : 1;
-    if (ci >= editable.length) {
-      ci = 0;
-      ri++;
-    } else if (ci < 0) {
-      ci = editable.length - 1;
-      ri--;
+    if (dir === "up") ri--;
+    else if (dir === "down") ri++;
+    else ci += dir === "prev" || dir === "left" ? -1 : 1;
+    if (ci >= editable.length || ci < 0) {
+      if (dir !== "next" && dir !== "prev") return;
+      ci = ci < 0 ? editable.length - 1 : 0;
+      ri += dir === "prev" ? -1 : 1;
     }
     if (ri < 0 || ri >= pagedRows.length) return;
     startEdit(editable[ci], pagedRows[ri]);
@@ -715,9 +737,11 @@ export default function InvoiceTable({
             }}
             onKeyDown={(e) => {
               if (e.key === "Escape") setEditingCell(null);
-              if (e.key === "Tab") {
+              // Arrows would otherwise change (and commit) the selected option; Alt+↓ still opens it.
+              const dir = navDir(e);
+              if (dir) {
                 e.preventDefault();
-                moveEdit(col, row, e.shiftKey);
+                moveEdit(col, row, dir);
               }
             }}
             className={selectEditCls}
@@ -741,18 +765,23 @@ export default function InvoiceTable({
         <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style, ...inlineEditShadow }}>
           <input
             autoFocus
-            type={col.format === "date" ? "date" : isNumericEdit(col) ? "number" : "text"}
-            step={isNumericEdit(col) ? "0.01" : undefined}
+            // Numbers use a text input (filtered to numeric chars) so the caret position is
+            // readable for Left/Right navigation and Up/Down don't step the value.
+            type={col.format === "date" ? "date" : "text"}
+            inputMode={isNumericEdit(col) ? "decimal" : undefined}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              if (!isNumericEdit(col) || NUMERIC_DRAFT.test(e.target.value)) setDraft(e.target.value);
+            }}
             onBlur={() => commitEdit(col, row)}
             onKeyDown={(e) => {
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
               if (e.key === "Escape") setEditingCell(null);
-              if (e.key === "Tab") {
+              const dir = navDir(e);
+              if (dir) {
                 e.preventDefault();
                 commitEdit(col, row);
-                moveEdit(col, row, e.shiftKey);
+                moveEdit(col, row, dir);
               }
             }}
             className={`${inlineEditCls} ${col.align === "right" ? "text-right" : ""}`}

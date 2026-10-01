@@ -4,6 +4,8 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, ty
 import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
 import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
 import ColumnFilterMenu from "./ColumnFilterMenu";
+import ChangeLogModal from "./ChangeLogModal";
+import { logCellKey, logTargetOf, skuLogTarget, type ChangeLogEntry, type LogTarget } from "@/lib/invoiceFields";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
 
 function formatDate(v: string | null): string {
@@ -105,6 +107,8 @@ const pendingDot = <span className="mr-1 inline-block h-1.5 w-1.5 shrink-0 round
 // right+bottom borders only (not left/top), so adjacent cells don't double up the line, and
 // no outer frame appears around the first column / top edge.
 const thBorder = { borderRight: "1px solid #9ca3af", borderBottom: "1px solid #9ca3af" };
+// Cells changed by the latest save (see lastSave); inline so it wins over sticky-column backgrounds.
+const changedCellStyle: CSSProperties = { backgroundColor: "#fef9c3" };
 const tdBorder = { borderRight: "1px dotted #9ca3af", borderBottom: "1px dotted #9ca3af" };
 // Inline-edit inputs must render at the exact same box size as the display text they replace —
 // no border/padding/fixed-height of their own — otherwise the cell (and whole row) visibly
@@ -157,6 +161,11 @@ export default function InvoiceTable({
   const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
   const [filterMenu, setFilterMenu] = useState<{ colKey: string; anchor: DOMRect } | null>(null);
   const closeFilterMenu = useCallback(() => setFilterMenu(null), []);
+  // Cells changed by the most recent save / upload of this table, keyed by logCellKey.
+  const [lastSave, setLastSave] = useState<Map<string, ChangeLogEntry>>(new Map());
+  // The row whose change history modal is open (the 이력 button at each row's end).
+  const [logRow, setLogRow] = useState<InvoiceRow | null>(null);
+  const closeLog = useCallback(() => setLogRow(null), []);
   // Dropdown values for the Shipper/Sender/Receiver/Buyer/Seller columns: whatever is already
   // stored in that same DB column (see getPartyOptions), keyed by optionKey(editTarget).
   const [partyOptions, setPartyOptions] = useState<Record<string, string[]>>({});
@@ -198,6 +207,14 @@ export default function InvoiceTable({
   }
 
   const load = useCallback(() => {
+    // The latest save's changes, for highlighting — optional, so a failure just shows none.
+    fetch(`${apiUrl}/changes?last=1`)
+      .then((res) => (res.ok ? res.json() : { entries: [] }))
+      .then((data: { entries: ChangeLogEntry[] }) => {
+        setLastSave(new Map(data.entries.map((e) => [logCellKey(e.shpmId, e), e])));
+      })
+      .catch(() => setLastSave(new Map()));
+
     return fetch(apiUrl)
       .then(async (res) => {
         const data = await res.json();
@@ -434,30 +451,21 @@ export default function InvoiceTable({
     }
     setSaving(true);
     try {
-      const cellReqs = cellEdits.map((e) => {
-        const target = e.editTarget;
-        const body =
-          target.kind === "master"
-            ? { kind: "master", field: target.field, value: e.value }
-            : target.kind === "party"
-              ? { kind: "party", invTpCd: target.invTpCd, field: target.field, value: e.value }
-              : { kind: "cost", costTpCd: target.costTpCd, field: target.field, value: e.value };
-        return fetch(`${apiUrl}/${e.shpmId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
+      // One request, one transaction: everything is saved (and change-logged as one save) or
+      // nothing is — on failure the pending edits stay so nothing typed is lost.
+      const res = await fetch(`${apiUrl}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cells: cellEdits.map((e) => ({ shpmId: e.shpmId, ...e.editTarget, value: e.value })),
+          skus: skuEdits.map((e) => ({ shpmDtlId: e.shpmDtlId, field: e.field, value: e.value })),
+        }),
       });
-      const skuReqs = skuEdits.map((e) =>
-        fetch(`${apiUrl}/${e.shpmId}/sku/${e.shpmDtlId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ field: e.field, value: e.value }),
-        })
-      );
-      const results = await Promise.all([...cellReqs, ...skuReqs]);
-      const failed = results.filter((r) => !r.ok);
-      if (failed.length > 0) alert(`${failed.length}건 저장에 실패했습니다.`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.message ?? "저장에 실패했습니다.");
+        return;
+      }
       setPendingCellEdits({});
       setPendingSkuEdits({});
       historyRef.current = [];
@@ -565,7 +573,7 @@ export default function InvoiceTable({
 
   const sections = getInvoiceSections(prdLineCd);
   const allColumns = sections.flatMap((s) => s.columns);
-  const totalCols = 1 + sections.reduce((sum, s) => sum + s.columns.length, 0); // +1 checkbox col
+  const totalCols = 2 + sections.reduce((sum, s) => sum + s.columns.length, 0); // + checkbox col + 이력 col
 
   // Frozen panes: the checkbox column plus the first `frozenCount` columns stay pinned while
   // scrolling sideways. The default is the leading ungrouped section (SHIPPER … USD); the pin
@@ -713,6 +721,7 @@ export default function InvoiceTable({
   const subRowBg = "bg-gray-50";
   const pendingCount = Object.keys(pendingCellEdits).length + Object.keys(pendingSkuEdits).length;
   const activeFilterCount = Object.keys(columnFilters).length;
+  const lastSaveInfo: ChangeLogEntry | undefined = lastSave.values().next().value;
 
   function handleSort(colKey: string) {
     if (sortKey !== colKey) {
@@ -858,6 +867,23 @@ export default function InvoiceTable({
     }
   }
 
+  // ---- Last-save highlight: cells whose stored value changed in the latest save / upload ----
+
+  function colLogTarget(col: InvoiceColumn): LogTarget | null {
+    if (col.editTarget) return logTargetOf(col.editTarget);
+    if (col.skuField === "sku") return logTargetOf({ kind: "master", field: "contNo" }); // CONTAINER
+    return null;
+  }
+
+  function changeAt(shpmId: number, target: LogTarget | null): ChangeLogEntry | undefined {
+    return target ? lastSave.get(logCellKey(shpmId, target)) : undefined;
+  }
+
+  function changeTitle(e: ChangeLogEntry, col?: InvoiceColumn): string {
+    const show = (v: string | null) => (v == null ? "(빈 값)" : col ? formatCell(col, v) || v : v);
+    return `마지막 저장에서 변경됨 · ${e.usrNm ?? e.usrId} · ${e.savedAt}\n기존: ${show(e.bfrVal)}\n변경: ${show(e.aftVal)}`;
+  }
+
   function renderCell(col: InvoiceColumn, row: InvoiceRow) {
     const isEditing = editingCell?.shpmId === row.shpmId && editingCell?.colKey === col.key;
     const isPending = `${row.shpmId}:${col.key}` in pendingCellEdits;
@@ -963,12 +989,13 @@ export default function InvoiceTable({
 
     const value = getEffectiveValue(col, row);
     const badDate = isInvalidDate(col, value);
+    const changed = changeAt(row.shpmId, colLogTarget(col));
     return (
       <td
         key={col.key}
         className={`${cellCls} ${fz.cls}`}
-        style={{ ...tdBorder, ...fz.style, ...(badDate ? { backgroundColor: "#fee2e2" } : null) }}
-        title={badDate ? "유효하지 않은 날짜 형식입니다 (yyyy-mm-dd)" : undefined}
+        style={{ ...tdBorder, ...fz.style, ...(badDate ? { backgroundColor: "#fee2e2" } : changed ? changedCellStyle : null) }}
+        title={badDate ? "유효하지 않은 날짜 형식입니다 (yyyy-mm-dd)" : changed ? changeTitle(changed, col) : undefined}
         onClick={() => startEdit(col, row)}
       >
         {isPending && pendingDot}
@@ -1014,8 +1041,14 @@ export default function InvoiceTable({
     if (col.skuField === "sku") {
       const editingCode = editingSku?.shpmDtlId === sku.shpmDtlId && editingSku.field === "skuCd";
       const codePending = `${sku.shpmDtlId}:skuCd` in pendingSkuEdits;
+      const codeChanged = changeAt(shpmId, skuLogTarget(sku.shpmDtlId, "skuCd"));
       return (
-        <td key={col.key} className={`${tdBase} ${fz.cls}`} style={{ ...tdBorder, ...fz.style }}>
+        <td
+          key={col.key}
+          className={`${tdBase} ${fz.cls}`}
+          style={{ ...tdBorder, ...fz.style, ...(codeChanged ? changedCellStyle : null) }}
+          title={codeChanged ? changeTitle(codeChanged) : undefined}
+        >
           <div className="flex items-center justify-between gap-1.5">
             <span className="flex items-center">
               {codePending && pendingDot}
@@ -1047,11 +1080,13 @@ export default function InvoiceTable({
         );
       }
       const value = getEffectiveSkuValue(sku, field);
+      const changed = changeAt(shpmId, skuLogTarget(sku.shpmDtlId, field));
       return (
         <td
           key={col.key}
           className={`${tdBase} cursor-pointer text-right hover:bg-gray-50 ${fz.cls}`}
-          style={{ ...tdBorder, ...fz.style }}
+          style={{ ...tdBorder, ...fz.style, ...(changed ? changedCellStyle : null) }}
+          title={changed ? changeTitle(changed, col) : undefined}
           onClick={() => startEditSku(sku, field)}
         >
           {isPending && pendingDot}
@@ -1143,10 +1178,20 @@ export default function InvoiceTable({
         )}
       </div>
 
+      {lastSaveInfo && (
+        <p className="flex items-center gap-1.5 border-b border-gray-100 px-5 py-2 text-xs text-gray-500">
+          <span className="inline-block h-3 w-3 rounded-sm border border-yellow-300" style={changedCellStyle} />
+          마지막 {lastSaveInfo.srcCd === "EXCEL" ? "엑셀 업로드" : "저장"}: {lastSaveInfo.usrNm ?? lastSaveInfo.usrId} · {lastSaveInfo.savedAt} ·{" "}
+          {lastSave.size}개 항목 변경 (노란 칸에 마우스를 올리면 기존 값이 보이고, 행 끝의 이력 버튼으로 전체 이력을 볼 수 있습니다)
+        </p>
+      )}
+
       {error && <p className="px-5 py-3 text-sm text-[#ff4b4b]">{error}</p>}
 
       {pagedRows && (
-        <div className="hover-scroll overflow-auto px-2" style={{ maxHeight: "calc(100vh - 280px)" }}>
+        <div className="hover-scroll mx-2 overflow-auto" style={{ maxHeight: "calc(100vh - 280px)" }}>
+          {/* Inset with margin, not padding: frozen (sticky-left) columns pin to the scroll box's
+              edge, and rows scrolled sideways would otherwise show through a padding strip. */}
           <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: "13px" }}>
             <thead>
               {/* Two header rows, like the source sheets. Row 1: group / top labels (see topCells).
@@ -1172,6 +1217,9 @@ export default function InvoiceTable({
                     {t.label}
                   </th>
                 ))}
+                <th className={`${thBase} text-center`} style={{ ...thBorder, top: 0 }} rowSpan={3}>
+                  이력
+                </th>
               </tr>
               <tr style={{ height: HEADER_ROW_H }}>
                 {allColumns.map((c, ci) => (
@@ -1256,6 +1304,7 @@ export default function InvoiceTable({
                     {c.align === "right" && c.format !== "date" ? formatCell(c, sumColumn(c)) : ""}
                   </th>
                 ))}
+                <th className={thSum} style={{ ...thBorder, top: SUM_ROW_TOP }} />
               </tr>
             </thead>
             <tbody>
@@ -1276,8 +1325,11 @@ export default function InvoiceTable({
                                 onClick={() => toggleExpanded(r.shpmId)}
                                 onDoubleClick={() => startEdit({ ...c, editTarget: { kind: "master", field: "contNo" } }, r)}
                                 className={`${tdBase} cursor-pointer font-medium text-[#ff4b4b] hover:bg-gray-50 ${frozen(c.key, rowBg).cls}`}
-                                style={{ ...tdBorder, ...frozen(c.key, rowBg).style }}
-                                title="클릭: SKU 상세 펼치기 / 더블클릭: 수정"
+                                style={{ ...tdBorder, ...frozen(c.key, rowBg).style, ...(changeAt(r.shpmId, colLogTarget(c)) ? changedCellStyle : null) }}
+                                title={[
+                                  "클릭: SKU 상세 펼치기 / 더블클릭: 수정",
+                                  ...[changeAt(r.shpmId, colLogTarget(c))].filter((e) => e !== undefined).map((e) => changeTitle(e)),
+                                ].join("\n\n")}
                               >
                                 {`${r.shpmId}:${c.key}` in pendingCellEdits && pendingDot}
                                 {editingCell?.shpmId === r.shpmId && editingCell?.colKey === c.key ? (
@@ -1307,6 +1359,15 @@ export default function InvoiceTable({
                           )}
                         </Fragment>
                       ))}
+                      <td className={`${tdBase} text-center`} style={tdBorder}>
+                        <button
+                          onClick={() => setLogRow(r)}
+                          className="rounded px-1.5 text-gray-400 hover:bg-gray-100 hover:text-[#ff4b4b]"
+                          title="이 행의 변경 이력"
+                        >
+                          <i className="fa-solid fa-clock-rotate-left text-xs" />
+                        </button>
+                      </td>
                     </tr>
                     {isExpanded &&
                       r.skuDetails.map((sku) => (
@@ -1315,12 +1376,13 @@ export default function InvoiceTable({
                           {sections.map((s, si) => (
                             <Fragment key={si}>{s.columns.map((c) => renderSkuCell(c, sku, r.shpmId))}</Fragment>
                           ))}
+                          <td className={tdBase} style={tdBorder} />
                         </tr>
                       ))}
                     {isExpanded && (
                       <tr className="bg-gray-50/60">
                         <td className={`${tdBase} ${frozen(null, subRowBg).cls}`} style={{ ...tdBorder, ...frozen(null, subRowBg).style }} />
-                        <td colSpan={totalCols - 1} className={tdBase} style={tdBorder}>
+                        <td colSpan={totalCols} className={tdBase} style={tdBorder}>
                           <button
                             onClick={() => handleAddSku(r.shpmId)}
                             className="sticky text-xs text-gray-400 hover:text-[#ff4b4b]"
@@ -1408,6 +1470,17 @@ export default function InvoiceTable({
             />
           );
         })()}
+
+      {logRow && (
+        <ChangeLogModal
+          apiUrl={apiUrl}
+          sections={sections}
+          shpmId={logRow.shpmId}
+          contNo={logRow.contNo}
+          lastSaveId={lastSaveInfo?.saveId ?? null}
+          onClose={closeLog}
+        />
+      )}
     </div>
   );
 }

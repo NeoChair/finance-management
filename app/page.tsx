@@ -2,11 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuthStore } from "@/app/store/useAuthStore";
 
 export default function LoginPage() {
   const router = useRouter();
-  const setUser = useAuthStore((state) => state.setUser);
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +28,7 @@ export default function LoginPage() {
         return;
       }
 
-      setUser(data.user);
+      // The session cookie is set now; the (home) layout reads the user from it.
       router.push("/home");
     } catch {
       setError("서버에 연결할 수 없습니다.");

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getInvoicesByProductLine, createShipment, type ShipmentInput } from "@/lib/invoice";
+import { getSessionUser, unauthorized } from "@/lib/currentUser";
 import { slugToProductLine } from "@/lib/productLines";
 
 const OWNR_ETP_CD = "KR-DT-HG";
@@ -19,6 +20,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ lin
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ line: string }> }) {
+  const user = await getSessionUser();
+  if (!user) return unauthorized();
+
   const { line } = await params;
   const prdLineCd = slugToProductLine(line);
   if (!prdLineCd) return NextResponse.json({ message: "알 수 없는 제품군입니다." }, { status: 404 });
@@ -29,7 +33,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ lin
   const input: ShipmentInput = { ...body, prdLineCd, ownrEtpCd: OWNR_ETP_CD };
 
   try {
-    const shpmId = await createShipment(input);
+    const shpmId = await createShipment(input, user.usrId);
     return NextResponse.json({ shpmId }, { status: 201 });
   } catch (err) {
     console.error(`[api/invoice/${line}] POST error:`, err);

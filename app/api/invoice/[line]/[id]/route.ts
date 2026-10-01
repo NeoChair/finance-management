@@ -1,37 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateShipment, deleteShipment, applyFieldEdit, type ShipmentInput, type FieldEdit, type PartyField } from "@/lib/invoice";
+import { updateShipment, deleteShipment, type ShipmentInput } from "@/lib/invoice";
+import { getSessionUser, unauthorized } from "@/lib/currentUser";
 import { slugToProductLine } from "@/lib/productLines";
 
 const OWNR_ETP_CD = "KR-DT-HG";
 
-const MASTER_FIELDS = new Set([
-  "suplFactNm", "sttsNm", "loadType", "hblNo", "mblNo", "contNo", "poNo",
-  "subpoNo", "podNm", "etd", "eta", "wrhsArrvDe", "usdExchRt", "invNo", "invDe", "currCd", "rmrk",
-]);
-const PARTY_FIELDS = new Set<string>(["sndrNm", "rcvrNm", "invNo", "invDe", "payDe"]);
-
-function parseFieldEdit(body: unknown): FieldEdit | null {
-  if (typeof body !== "object" || body === null) return null;
-  const b = body as Record<string, unknown>;
-
-  if (b.kind === "master" && typeof b.field === "string" && MASTER_FIELDS.has(b.field)) {
-    return { kind: "master", field: b.field as FieldEdit extends { kind: "master"; field: infer F } ? F : never, value: (b.value as string | number | null) ?? null };
-  }
-  // field absent → the amount (numeric); otherwise a name / invoice no / YYYYMMDD date (text).
-  if (b.field !== undefined && !(typeof b.field === "string" && PARTY_FIELDS.has(b.field))) return null;
-  const field = b.field as PartyField | undefined;
-  const value = b.value == null || b.value === "" ? null : field ? String(b.value) : Number(b.value);
-
-  if (b.kind === "party" && (b.invTpCd === "NEO" || b.invTpCd === "FACTORY")) {
-    return { kind: "party", invTpCd: b.invTpCd, field, value };
-  }
-  if (b.kind === "cost" && typeof b.costTpCd === "string") {
-    return { kind: "cost", costTpCd: b.costTpCd, field, value };
-  }
-  return null;
-}
+// Single-cell edits go through POST ../save (one transaction, change-logged), not per cell here.
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ line: string; id: string }> }) {
+  const user = await getSessionUser();
+  if (!user) return unauthorized();
+
   const { line, id } = await params;
   const prdLineCd = slugToProductLine(line);
   if (!prdLineCd) return NextResponse.json({ message: "알 수 없는 제품군입니다." }, { status: 404 });
@@ -45,28 +24,10 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ line
   const input: ShipmentInput = { ...body, prdLineCd, ownrEtpCd: OWNR_ETP_CD };
 
   try {
-    await updateShipment(shpmId, input);
+    await updateShipment(shpmId, input, user.usrId);
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error(`[api/invoice/${line}/${id}] PUT error:`, err);
-    return NextResponse.json({ message: "수정에 실패했습니다." }, { status: 500 });
-  }
-}
-
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ line: string; id: string }> }) {
-  const { line, id } = await params;
-  const shpmId = Number(id);
-  if (!Number.isInteger(shpmId)) return NextResponse.json({ message: "잘못된 ID입니다." }, { status: 400 });
-
-  const body = await req.json().catch(() => null);
-  const edit = parseFieldEdit(body);
-  if (!edit) return NextResponse.json({ message: "잘못된 요청입니다." }, { status: 400 });
-
-  try {
-    await applyFieldEdit(shpmId, edit);
-    return NextResponse.json({ ok: true });
-  } catch (err) {
-    console.error(`[api/invoice/${line}/${id}] PATCH error:`, err);
     return NextResponse.json({ message: "수정에 실패했습니다." }, { status: 500 });
   }
 }

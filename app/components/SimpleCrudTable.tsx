@@ -112,7 +112,19 @@ export default function SimpleCrudTable({
     if (!editingCell) return;
     const { id, key } = editingCell;
     setEditingCell(null);
-    setPendingEdits((prev) => ({ ...prev, [`${id}:${key}`]: { id, key, value: picked ?? draft } }));
+    const value = picked ?? draft;
+    const pendingKey = `${id}:${key}`;
+    // Back to the original value → drop the pending edit instead of marking it changed.
+    if (value === (row[key] ?? "")) {
+      setPendingEdits((prev) => {
+        if (!(pendingKey in prev)) return prev;
+        const next = { ...prev };
+        delete next[pendingKey];
+        return next;
+      });
+      return;
+    }
+    setPendingEdits((prev) => ({ ...prev, [pendingKey]: { id, key, value } }));
   }
 
   async function handleAddRow() {

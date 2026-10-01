@@ -10,6 +10,15 @@ function formatDate(v: string | null): string {
   return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`;
 }
 
+// Whether an edited value matches the original — blank and null count as the same, and numbers
+// compare numerically so "10" vs 10.00 isn't treated as a change.
+function sameValue(a: string | number | null, b: string | number | null): boolean {
+  const sa = a == null ? "" : String(a);
+  const sb = b == null ? "" : String(b);
+  if (sa === sb) return true;
+  return sa !== "" && sb !== "" && !isNaN(Number(sa)) && !isNaN(Number(sb)) && Number(sa) === Number(sb);
+}
+
 function formatCell(col: InvoiceColumn, value: string | number | null): string {
   if (value == null || value === "") return "";
   if (col.format === "date") return formatDate(String(value));
@@ -163,7 +172,9 @@ export default function InvoiceTable({
   // `picked` is passed by the dropdown, which commits on change rather than on blur.
   function commitEdit(col: InvoiceColumn, row: InvoiceRow, picked?: string) {
     const target = col.editTarget;
-    setEditingCell(null);
+    // Only close the editor if it's still this cell — after Tab moves to the next cell, the old
+    // input's late blur must not cancel the new edit.
+    setEditingCell((prev) => (prev?.shpmId === row.shpmId && prev.colKey === col.key ? null : prev));
     if (!target) return;
 
     let value: string | number | null;
@@ -178,7 +189,37 @@ export default function InvoiceTable({
     }
 
     const key = `${row.shpmId}:${col.key}`;
+    // Back to the original value → drop the pending edit instead of marking it changed.
+    if (sameValue(value, col.getValue(row))) {
+      setPendingCellEdits((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      return;
+    }
     setPendingCellEdits((prev) => ({ ...prev, [key]: { shpmId: row.shpmId, editTarget: target, value } }));
+  }
+
+  // Tab / Shift+Tab: jump to the next/previous editable cell like a spreadsheet, wrapping to the
+  // neighbouring row at the ends, instead of letting the browser focus the row checkbox.
+  function moveEdit(col: InvoiceColumn, row: InvoiceRow, back: boolean) {
+    if (!pagedRows) return;
+    const editable = allColumns.filter((c) => c.editTarget);
+    let ci = editable.findIndex((c) => c.key === col.key);
+    let ri = pagedRows.findIndex((r) => r.shpmId === row.shpmId);
+    if (ci < 0 || ri < 0) return;
+    ci += back ? -1 : 1;
+    if (ci >= editable.length) {
+      ci = 0;
+      ri++;
+    } else if (ci < 0) {
+      ci = editable.length - 1;
+      ri--;
+    }
+    if (ri < 0 || ri >= pagedRows.length) return;
+    startEdit(editable[ci], pagedRows[ri]);
   }
 
   async function handleAddRow() {
@@ -310,6 +351,17 @@ export default function InvoiceTable({
     setEditingSku(null);
     const value: string | number | null = skuDraft === "" ? null : field === "skuCd" ? skuDraft : Number(skuDraft);
     const key = `${shpmDtlId}:${field}`;
+    const sku = rows?.find((r) => r.shpmId === shpmId)?.skuDetails.find((s) => s.shpmDtlId === shpmDtlId);
+    const original = !sku ? undefined : field === "skuCd" ? sku.skuCd : field === "qty" ? sku.qty : field === "unitPrc" ? sku.unitPrc : sku.amt;
+    if (original !== undefined && sameValue(value, original)) {
+      setPendingSkuEdits((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      return;
+    }
     setPendingSkuEdits((prev) => ({ ...prev, [key]: { shpmId, shpmDtlId, field, value } }));
   }
 
@@ -658,10 +710,15 @@ export default function InvoiceTable({
               }
             }}
             onBlur={() => {
-              if (!manualEntryRef.current) setEditingCell(null);
+              if (!manualEntryRef.current)
+                setEditingCell((prev) => (prev?.shpmId === row.shpmId && prev.colKey === col.key ? null : prev));
             }}
             onKeyDown={(e) => {
               if (e.key === "Escape") setEditingCell(null);
+              if (e.key === "Tab") {
+                e.preventDefault();
+                moveEdit(col, row, e.shiftKey);
+              }
             }}
             className={selectEditCls}
           >
@@ -692,6 +749,11 @@ export default function InvoiceTable({
             onKeyDown={(e) => {
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
               if (e.key === "Escape") setEditingCell(null);
+              if (e.key === "Tab") {
+                e.preventDefault();
+                commitEdit(col, row);
+                moveEdit(col, row, e.shiftKey);
+              }
             }}
             className={`${inlineEditCls} ${col.align === "right" ? "text-right" : ""}`}
           />

@@ -18,19 +18,22 @@ export type EditPerms = { admin: boolean; codes: PermCode[] };
 type Target =
   | { kind: "master"; field: string }
   | { kind: "party"; invTpCd: string; field?: string }
-  | { kind: "cost"; costTpCd: string; field?: string };
+  | { kind: "cost"; costTpCd: string; field?: string }
+  | { kind: "sku"; field: string };
 
 /** The permission a non-admin needs to edit this value; null = admin only. Shipment master
- *  fields and SKU lines are admin only; on invoice / cost lines the amount needs AMT and the
- *  payment date PAY_DE, while names / invoice no / invoice date stay admin only. */
-export function requiredPerm(target: Target | "sku"): PermCode | null {
-  if (target === "sku" || target.kind === "master") return null;
+ *  fields and SKU lines are admin only, except a SKU line's amount (AMT); on invoice / cost
+ *  lines the amount needs AMT and the payment date PAY_DE, while names / invoice no / invoice
+ *  date stay admin only. */
+export function requiredPerm(target: Target): PermCode | null {
+  if (target.kind === "sku") return target.field === "amt" ? "AMT" : null;
+  if (target.kind === "master") return null;
   if (!target.field) return "AMT";
   if (target.field === "payDe") return "PAY_DE";
   return null;
 }
 
-export function canEdit(perms: EditPerms, target: Target | "sku"): boolean {
+export function canEdit(perms: EditPerms, target: Target): boolean {
   if (perms.admin) return true;
   const need = requiredPerm(target);
   return need !== null && perms.codes.includes(need);

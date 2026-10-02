@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { InvoiceRow } from "@/lib/invoice";
 import type { InvoiceColumn, InvoiceSection } from "@/lib/invoiceColumns";
 
@@ -11,7 +11,7 @@ function money(n: number): string {
 }
 
 type Totals = { total: number; unpaid: number };
-type Category = Totals & { label: string; hasReceiver: boolean; byReceiver: Map<string, Totals> };
+type Category = Totals & { key: string; label: string; hasReceiver: boolean; byReceiver: Map<string, Totals> };
 
 // Every table section holding an amount is one category (Product, Freight, Duty, Trucking …).
 // A section's own RCVer/Receiver/BUYER column splits it by receiver, and its Payment date
@@ -23,7 +23,8 @@ function categories(sections: InvoiceSection[]) {
     const field = (f: string) => s.columns.find((c) => c.editTarget && c.editTarget.kind !== "master" && c.editTarget.field === f);
     // A section with several amounts (O/FRT + HDC CHG + OCF/HDC) is labelled by its group.
     const label = s.groupLabel?.trim() || amounts[0].label;
-    return [{ label, amounts, receiver: field("rcvrNm"), payDate: field("payDe") }];
+    // Labels can repeat once trimmed (CHAIR has two "NEO CHAIR -> HYGGE" groups), so key by column.
+    return [{ key: amounts[0].key, label, amounts, receiver: field("rcvrNm"), payDate: field("payDe") }];
   });
 }
 
@@ -33,17 +34,20 @@ export default function SettlementSummary({
   rows,
   sections,
   valueOf,
+  actions,
 }: {
   rows: InvoiceRow[];
   sections: InvoiceSection[];
   /** The value a cell shows (including unsaved edits). */
   valueOf: (col: InvoiceColumn, row: InvoiceRow) => string | number | null;
+  /** Table view controls shown at the right end of this line (e.g. Expand All). */
+  actions?: ReactNode;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   const list: Category[] = [];
   for (const spec of categories(sections)) {
-    const cat: Category = { label: spec.label, hasReceiver: !!spec.receiver, total: 0, unpaid: 0, byReceiver: new Map() };
+    const cat: Category = { key: spec.key, label: spec.label, hasReceiver: !!spec.receiver, total: 0, unpaid: 0, byReceiver: new Map() };
     for (const row of rows) {
       const amt = spec.amounts.reduce((sum, c) => sum + Number(valueOf(c, row) ?? 0), 0);
       const named = spec.receiver ? String(valueOf(spec.receiver, row) ?? "").trim() : "";
@@ -68,15 +72,18 @@ export default function SettlementSummary({
   const unpaid = list.reduce((sum, c) => sum + c.unpaid, 0);
 
   return (
-    <div className="border-b border-gray-100 px-5 py-2.5">
-      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 text-xs font-semibold text-gray-600 hover:text-[#ff4b4b]">
-        <i className={`fa-solid fa-chevron-right text-[9px] transition-transform ${open ? "rotate-90" : ""}`} />
-        금액 요약
-        <span className="font-normal text-gray-400">
-          · {rows.length}건 · 합계 {money(total)}
-          {unpaid > 0 && <span className="text-[#ff4b4b]"> · 미지급 {money(unpaid)}</span>}
-        </span>
-      </button>
+    <div className="border-b border-gray-100 px-5 py-2">
+      <div className="flex min-h-6 items-center justify-between gap-2">
+        <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 text-xs font-semibold text-gray-600 hover:text-[#ff4b4b]">
+          <i className={`fa-solid fa-chevron-right text-[9px] transition-transform ${open ? "rotate-90" : ""}`} />
+          금액 요약
+          <span className="font-normal text-gray-400">
+            · {rows.length}건 · 합계 {money(total)}
+            {unpaid > 0 && <span className="text-[#ff4b4b]"> · 미지급 {money(unpaid)}</span>}
+          </span>
+        </button>
+        {actions}
+      </div>
       {open && (
         <div className="mt-2 grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
           {list.map((c) => {
@@ -84,7 +91,7 @@ export default function SettlementSummary({
             // One receiver: name it next to the title instead of repeating the same figures.
             const single = receivers.length === 1 ? receivers[0][0] : null;
             return (
-              <div key={c.label} className={`rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2 text-xs ${c.total ? "" : "opacity-50"}`}>
+              <div key={c.key}className={`rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2 text-xs ${c.total ? "" : "opacity-50"}`}>
                 <p className="truncate text-gray-500">
                   {c.label}
                   {single && <span className="text-gray-400"> → {single}</span>}

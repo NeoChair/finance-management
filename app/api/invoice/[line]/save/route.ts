@@ -67,7 +67,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ lin
   // Column permissions: the client only opens permitted cells, but every edit is checked here.
   try {
     const perms = await getEditPerms(user);
-    if (cells.some((c) => !canEdit(perms, c.edit)) || (skus.length > 0 && !canEdit(perms, "sku"))) {
+    if (cells.some((c) => !canEdit(perms, c.edit)) || skus.some((s) => !canEdit(perms, { kind: "sku", field: s.edit.field }))) {
       return forbidden("수정 권한이 없는 항목이 포함되어 있어 저장하지 않았습니다.");
     }
   } catch (err) {

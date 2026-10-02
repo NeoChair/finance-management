@@ -9,7 +9,9 @@ import SettlementSummary from "./SettlementSummary";
 import { useEditPerms } from "./UserProvider";
 import { canEdit, PERM_LABELS } from "@/lib/permissions";
 import { logCellKey, logTargetOf, skuLogTarget, type ChangeLogEntry, type LogTarget, type SkuField } from "@/lib/invoiceFields";
-import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
+import { actualQtyIfDifferent, getInvoiceSections, optionKey, QTY_MISMATCH_BG, QTY_MISMATCH_FG, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
+
+const qtyMismatchStyle = { backgroundColor: QTY_MISMATCH_BG, color: QTY_MISMATCH_FG };
 
 function formatDate(v: string | null): string {
   if (!v || v.length !== 8) return "";
@@ -157,7 +159,8 @@ export default function InvoiceTable({
   // Column permissions (see lib/permissions): cells open for editing only where allowed; adding,
   // deleting and Import are for system admins. The server checks all of it again.
   const perms = useEditPerms();
-  const skuEditable = canEdit(perms, "sku");
+  // SKU lines are admin only, except their amount (AMT permission).
+  const skuEditable = (field: SkuField) => canEdit(perms, { kind: "sku", field });
   const canSave = perms.admin || perms.codes.length > 0;
   const [rows, setRows] = useState<InvoiceRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -200,8 +203,7 @@ export default function InvoiceTable({
   const skuDraftStartRef = useRef("");
   const historyRef = useRef<{ cell: Record<string, PendingCellEdit>; sku: Record<string, PendingSkuEdit> }[]>([]);
   const undoRef = useRef<() => void>(() => {});
-  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
-  const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
+  const [excelMenuOpen, setExcelMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadPartyOptions = useCallback(() => {
@@ -273,6 +275,12 @@ export default function InvoiceTable({
     const pending = pendingSkuEdits[`${sku.shpmDtlId}:${field}`];
     if (pending) return pending.value;
     return skuValue(sku, field);
+  }
+
+  /** Invoice vs actual loaded quantity (two lines) when this SKU's loaded quantity differs from its declared QTY. */
+  function skuQtyMismatch(sku: InvoiceSku): string | null {
+    const actl = actualQtyIfDifferent(sku, getEffectiveSkuValue(sku, "qty") as number | null);
+    return actl == null ? null : `Invoice : ${getEffectiveSkuValue(sku, "qty") ?? 0}\nActual load 수량 : ${actl}`;
   }
 
   // Snapshot of both pending maps before each change, for Ctrl+Z. Cleared on save / row delete,
@@ -373,34 +381,6 @@ export default function InvoiceTable({
     }
     if (ri < 0 || ri >= pagedRows.length) return;
     startEdit(editable[ci], pagedRows[ri]);
-  }
-
-  async function handleAddRow() {
-    // (HBL_NO, MBL_NO, CONT_NO) has a UNIQUE constraint in the DB, and SQL Server treats
-    // NULL as equal to NULL there — so a blank container would collide after the first new
-    // row. Seed it with a throwaway unique placeholder the user overwrites via double-click.
-    const blank = {
-      suplFactNm: null, sttsNm: null, loadType: null, hblNo: null, mblNo: null,
-      contNo: `NEW-${Date.now()}`,
-      poNo: null, subpoNo: null, podNm: null, etd: null, eta: null, wrhsArrvDe: null,
-      usdExchRt: null, invNo: null, invDe: null, currCd: "USD", rmrk: null,
-    };
-    setSaving(true);
-    try {
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(blank),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert(data.message ?? "추가에 실패했습니다.");
-        return;
-      }
-      await load();
-    } finally {
-      setSaving(false);
-    }
   }
 
   function clearPendingForShpmIds(ids: Set<number>) {
@@ -508,7 +488,7 @@ export default function InvoiceTable({
   }
 
   function startEditSku(sku: InvoiceSku, field: SkuField) {
-    if (!skuEditable) return;
+    if (!skuEditable(field)) return;
     const raw = getEffectiveSkuValue(sku, field);
     openSkuEditor(sku.shpmDtlId, field, raw == null ? "" : String(raw));
   }
@@ -545,7 +525,7 @@ export default function InvoiceTable({
     if (!skus) return;
     const fields = allColumns.flatMap((c): SkuField[] =>
       c.skuField === "sku" ? ["skuCd"] : c.skuField ? [c.skuField] : []
-    );
+    ).filter((f) => skuEditable(f));
     let ci = fields.indexOf(field);
     let ri = skus.findIndex((s) => s.shpmDtlId === shpmDtlId);
     if (ci < 0 || ri < 0) return;
@@ -743,6 +723,9 @@ export default function InvoiceTable({
     };
   }
   const rowBg = "bg-white group-hover/row:bg-gray-50";
+  // Checked rows: blue tint, kept apart from the yellow (changed) / red (QTY mismatch) cell marks.
+  const selectedRowBg = "bg-[#eef4ff] group-hover/row:bg-[#e3ecfd]";
+  const rowBgOf = (shpmId: number) => (selectedIds.has(shpmId) ? selectedRowBg : rowBg);
   const subRowBg = "bg-gray-50";
   const activeFilterCount = Object.keys(columnFilters).length;
   const lastSaveInfo: ChangeLogEntry | undefined = lastSave.values().next().value;
@@ -817,6 +800,10 @@ export default function InvoiceTable({
   const currentPage = Math.min(page, totalPages);
   const pagedRows = sortedRows ? sortedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize) : null;
   const pageIds = pagedRows?.map((r) => r.shpmId) ?? [];
+  const pendingCount = Object.keys(pendingCellEdits).length + Object.keys(pendingSkuEdits).length;
+  // Expand/Collapse All covers every filtered row that has SKU lines, so other pages open too.
+  const expandableIds = sortedRows?.filter((r) => r.skuDetails.length > 0).map((r) => r.shpmId) ?? [];
+  const allExpanded = expandableIds.length > 0 && expandableIds.every((id) => expanded.has(id));
   const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
 
   // Subtotal covers every filtered/sorted row (not just the current page) — QTY/Amount columns
@@ -852,14 +839,14 @@ export default function InvoiceTable({
 
   // Export = one line per shipment; Export Detail = one line per SKU (with SKU / CBM columns).
   async function handleDownload(detail: boolean) {
-    setDownloadMenuOpen(false);
+    setExcelMenuOpen(false);
     if (!rows) return;
     await saveWorkbook(exportRows, detail ? `${fileName}_detail` : fileName, detail);
   }
 
   async function handleTemplateDownload() {
-    setUploadMenuOpen(false);
-    await saveWorkbook([], `${fileName}_template`, true);
+    setExcelMenuOpen(false);
+    await saveWorkbook([],`${fileName}_template`, true);
   }
 
   async function handleUploadFile(file: File) {
@@ -921,7 +908,7 @@ export default function InvoiceTable({
     const isPending = `${row.shpmId}:${col.key}` in pendingCellEdits;
     const editableCell = !!col.editTarget && canEdit(perms, col.editTarget);
     const cellCls = `${tdBase} ${col.align === "right" ? "text-right" : ""} ${editableCell ? "cursor-pointer hover:bg-gray-50" : ""}`;
-    const fz = frozen(col.key, rowBg);
+    const fz = frozen(col.key, rowBgOf(row.shpmId));
 
     if (isEditing && col.select === "used" && col.editTarget && !manualEntry) {
       const opts = partyOptions[optionKey(col.editTarget)] ?? [];
@@ -1023,12 +1010,32 @@ export default function InvoiceTable({
     const value = getEffectiveValue(col, row);
     const badDate = isInvalidDate(col, value);
     const changed = changeAt(row.shpmId, colLogTarget(col));
+    // Product QTY = declared total; flagged when any SKU loaded a different actual quantity.
+    // Tooltip: container totals (a SKU without ACTL_QTY counts at its declared qty), then the differing SKUs.
+    const qtyMismatches = col.skuField === "qty" ? row.skuDetails.filter((s) => skuQtyMismatch(s) !== null) : [];
+    const skuQty = (s: InvoiceSku) => Number(getEffectiveSkuValue(s, "qty") ?? 0);
+    const qtyMismatchTitle = qtyMismatches.length
+      ? [
+          `Invoice : ${row.skuDetails.reduce((sum, s) => sum + skuQty(s), 0)}`,
+          `Actual load 수량 : ${row.skuDetails.reduce((sum, s) => sum + (s.actlQty ?? skuQty(s)), 0)}`,
+          "",
+          ...qtyMismatches.map((s) => `[${s.skuCd || "SKU 없음"}] ${skuQty(s)} → ${s.actlQty}`),
+        ].join("\n")
+      : null;
+    const titles = [
+      qtyMismatchTitle,
+      badDate ? "유효하지 않은 날짜 형식입니다 (yyyy-mm-dd)" : changed ? changeTitle(changed, col) : null,
+    ].filter((t) => t !== null);
     return (
       <td
         key={col.key}
         className={`${cellCls} ${fz.cls}`}
-        style={{ ...tdBorder, ...fz.style, ...(badDate ? { backgroundColor: "#fee2e2" } : changed ? changedCellStyle : null) }}
-        title={badDate ? "유효하지 않은 날짜 형식입니다 (yyyy-mm-dd)" : changed ? changeTitle(changed, col) : undefined}
+        style={{
+          ...tdBorder,
+          ...fz.style,
+          ...(badDate ? { backgroundColor: "#fee2e2" } : qtyMismatches.length ? qtyMismatchStyle : changed ? changedCellStyle : null),
+        }}
+        title={titles.length ? titles.join("\n\n") : undefined}
         onClick={() => startEdit(col, row)}
       >
         {isPending && pendingDot}
@@ -1090,8 +1097,8 @@ export default function InvoiceTable({
               ) : (
                 // The whole space left of the trash icon is the click target, and a blank code
                 // shows a placeholder — otherwise an empty code has nothing to click on.
-                <span className={`min-w-[60px] flex-1 ${skuEditable ? "cursor-pointer hover:text-[#ff4b4b]" : ""}`} onClick={() => startEditSku(sku, "skuCd")}>
-                  {getEffectiveSkuValue(sku, "skuCd") || (skuEditable && <span className="text-gray-300">(SKU 입력)</span>)}
+                <span className={`min-w-[60px] flex-1 ${skuEditable("skuCd") ? "cursor-pointer hover:text-[#ff4b4b]" : ""}`} onClick={() => startEditSku(sku, "skuCd")}>
+                  {getEffectiveSkuValue(sku, "skuCd") || (skuEditable("skuCd") &&<span className="text-gray-300">(SKU 입력)</span>)}
                 </span>
               )}
             </span>
@@ -1118,12 +1125,14 @@ export default function InvoiceTable({
       }
       const value = getEffectiveSkuValue(sku, field);
       const changed = changeAt(shpmId, skuLogTarget(sku.shpmDtlId, field));
+      const mismatch = field === "qty" ? skuQtyMismatch(sku) : null;
+      const titles = [mismatch, changed ? changeTitle(changed, col) : null].filter((t) => t !== null);
       return (
         <td
           key={col.key}
-          className={`${tdBase} text-right ${skuEditable ? "cursor-pointer hover:bg-gray-50" : ""} ${fz.cls}`}
-          style={{ ...tdBorder, ...fz.style, ...(changed ? changedCellStyle : null) }}
-          title={changed ? changeTitle(changed, col) : undefined}
+          className={`${tdBase} text-right ${skuEditable(field) ? "cursor-pointer hover:bg-gray-50" : ""} ${fz.cls}`}
+          style={{ ...tdBorder, ...fz.style, ...(mismatch ? qtyMismatchStyle : changed ? changedCellStyle : null) }}
+          title={titles.length ? titles.join("\n\n") : undefined}
           onClick={() => startEditSku(sku, field)}
         >
           {isPending && pendingDot}
@@ -1137,53 +1146,73 @@ export default function InvoiceTable({
 
   return (
     <div className="flex flex-col">
-      <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-5 py-3.5">
-        <p className="text-xs text-gray-400">
-          {!rows
-            ? error ? "" : "불러오는 중..."
-            : !canSave
-              ? "읽기 전용입니다 · 수정 권한은 시스템 관리자에게 요청하세요"
-              : perms.admin
-                ? "셀을 클릭해 수정 · Enter/포커스 아웃 시 임시 반영 · 저장 버튼을 눌러야 서버에 반영됩니다"
-                : `${perms.codes.map((p) => PERM_LABELS[p]).join(", ")} 권한 · 해당 칸만 수정할 수 있습니다 · 저장 버튼을 눌러야 반영됩니다`}
-        </p>
+      <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-5 py-3">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-gray-500">
+          {!rows ? (
+            <span className="text-gray-400">{error ? "" : "불러오는 중..."}</span>
+          ) : (
+            <>
+              {/* How editing works, on hover — it used to take a whole line. */}
+              <i
+                className="fa-solid fa-circle-info cursor-help text-sm text-gray-300 hover:text-gray-500"
+                title={
+                  !canSave
+                    ? "읽기 전용입니다 · 수정 권한은 시스템 관리자에게 요청하세요"
+                    : perms.admin
+                      ? "셀을 클릭해 수정 · Enter/포커스 아웃 시 임시 반영 · 저장 버튼을 눌러야 서버에 반영됩니다"
+                      : `${perms.codes.map((p) => PERM_LABELS[p]).join(", ")} 권한 · 해당 칸만 수정할 수 있습니다 · 저장 버튼을 눌러야 반영됩니다`
+                }
+              />
+              {!canSave && <span className="text-gray-400">읽기 전용</span>}
+              {lastSaveInfo && (
+                <span className="flex min-w-0 items-center gap-1.5 truncate">
+                  <span className="inline-block h-3 w-3 shrink-0 rounded-sm border border-yellow-300" style={changedCellStyle} />
+                  마지막 {lastSaveInfo.srcCd === "EXCEL" ? "엑셀 업로드" : "저장"}: {lastSaveInfo.usrNm ?? lastSaveInfo.usrId} · {lastSaveInfo.savedAt}
+                </span>
+              )}
+            </>
+          )}
+        </div>
         {rows && (
           <div className="flex items-center gap-2">
-            {saving && <span className="text-xs text-gray-400">처리 중...</span>}
             {activeFilterCount > 0 && (
               <button onClick={() => setColumnFilters({})} className={toolbarBtnCls}>
                 <i className="fa-solid fa-filter-circle-xmark text-xs" />
                 필터 초기화 ({activeFilterCount})
               </button>
             )}
-            {canSave && (
-              <button onClick={handleSaveAll} className={toolbarBtnCls}>
-                <i className="fa-solid fa-floppy-disk text-xs" />
-                저장
-              </button>
-            )}
-            {perms.admin && (
+            {/* Delete only appears once rows are checked. */}
+            {perms.admin && selectedIds.size > 0 && (
               <button onClick={handleBulkDelete} className={toolbarBtnCls}>
                 <i className="fa-solid fa-trash text-xs" />
-                삭제{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
+                삭제 ({selectedIds.size})
               </button>
             )}
-            {perms.admin && (
-              <button onClick={handleAddRow} className={toolbarBtnCls}>
-                <i className="fa-solid fa-plus text-xs" />
-                추가
+            {canSave && (
+              <button
+                onClick={handleSaveAll}
+                disabled={saving || pendingCount === 0}
+                className={
+                  pendingCount > 0
+                    ? "inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#ff4b4b] bg-[#ff4b4b] px-3.5 text-sm font-medium text-white hover:bg-[#e64343] disabled:opacity-70"
+                    : "inline-flex h-9 shrink-0 cursor-default items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-gray-50 px-3.5 text-sm text-gray-400"
+                }
+              >
+                <i className={`fa-solid ${saving ? "fa-spinner fa-spin" : "fa-floppy-disk"} text-xs`} />
+                저장{pendingCount > 0 ? ` (${pendingCount})` : ""}
               </button>
             )}
             <div className="relative">
-              <button onClick={() => setDownloadMenuOpen((open) => !open)} className={toolbarBtnCls}>
-                <i className="fa-solid fa-download text-xs" />
-                Export
+              <button onClick={() => setExcelMenuOpen((open) => !open)} className={toolbarBtnCls}>
+                <i className="fa-solid fa-file-excel text-xs" />
+                엑셀
+                <i className="fa-solid fa-chevron-down text-[9px]" />
               </button>
-              {downloadMenuOpen && (
+              {excelMenuOpen && (
                 <>
-                  <div className="fixed inset-0 z-20" onClick={() => setDownloadMenuOpen(false)} />
-                  <div className="absolute right-0 top-10 z-30 w-48 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
-                    <p className="px-3.5 pb-1 pt-1.5 text-[11px] text-gray-400">{exportScope}</p>
+                  <div className="fixed inset-0 z-20" onClick={() => setExcelMenuOpen(false)} />
+                  <div className="absolute right-0 top-10 z-30 w-52 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <p className="px-3.5 pb-1 pt-1.5 text-[11px] text-gray-400">내려받기 · {exportScope}</p>
                     <button
                       onClick={() => handleDownload(false)}
                       className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
@@ -1200,36 +1229,29 @@ export default function InvoiceTable({
                       Export Detail
                       <span className="ml-1.5 text-[11px] text-gray-400">SKU별</span>
                     </button>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className={`relative ${perms.admin ? "" : "hidden"}`}>
-              <button onClick={() => setUploadMenuOpen((open) => !open)} className={toolbarBtnCls}>
-                <i className="fa-solid fa-upload text-xs" />
-                Import
-              </button>
-              {uploadMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-20" onClick={() => setUploadMenuOpen(false)} />
-                  <div className="absolute right-0 top-10 z-30 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
-                    <button
-                      onClick={handleTemplateDownload}
-                      className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
-                    >
-                      <i className="fa-solid fa-file-arrow-down mr-2 text-xs" />
-                      양식 다운받기
-                    </button>
-                    <button
-                      onClick={() => {
-                        setUploadMenuOpen(false);
-                        fileInputRef.current?.click();
-                      }}
-                      className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
-                    >
-                      <i className="fa-solid fa-file-arrow-up mr-2 text-xs" />
-                      파일 업로드
-                    </button>
+                    {perms.admin && (
+                      <>
+                        <div className="my-1 border-t border-gray-100" />
+                        <p className="px-3.5 pb-1 pt-1 text-[11px] text-gray-400">올리기</p>
+                        <button
+                          onClick={handleTemplateDownload}
+                          className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
+                        >
+                          <i className="fa-solid fa-file-arrow-down mr-2 text-xs" />
+                          양식 다운받기
+                        </button>
+                        <button
+                          onClick={() => {
+                            setExcelMenuOpen(false);
+                            fileInputRef.current?.click();
+                          }}
+                          className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
+                        >
+                          <i className="fa-solid fa-file-arrow-up mr-2 text-xs" />
+                          파일 업로드
+                        </button>
+                      </>
+                    )}
                   </div>
                 </>
               )}
@@ -1249,15 +1271,24 @@ export default function InvoiceTable({
         )}
       </div>
 
-      {lastSaveInfo && (
-        <p className="flex items-center gap-1.5 border-b border-gray-100 px-5 py-2 text-xs text-gray-500">
-          <span className="inline-block h-3 w-3 rounded-sm border border-yellow-300" style={changedCellStyle} />
-          마지막 {lastSaveInfo.srcCd === "EXCEL" ? "엑셀 업로드" : "저장"}: {lastSaveInfo.usrNm ?? lastSaveInfo.usrId} · {lastSaveInfo.savedAt} ·{" "}
-          {lastSave.size}개 항목 변경 (노란 칸에 마우스를 올리면 기존 값이 보이고, 행 끝의 이력 버튼으로 전체 이력을 볼 수 있습니다)
-        </p>
+      {sortedRows && (
+        <SettlementSummary
+          rows={sortedRows}
+          sections={sections}
+          valueOf={getEffectiveValue}
+          actions={
+            expandableIds.length > 0 && (
+              <button
+                onClick={() => setExpanded(allExpanded ? new Set() : new Set(expandableIds))}
+                className="flex items-center gap-1.5 rounded px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-[#ff4b4b]"
+              >
+                <i className={`fa-solid ${allExpanded ? "fa-angles-up" : "fa-angles-down"} text-[10px]`} />
+                {allExpanded ? "Collapse All" : "Expand All"}
+              </button>
+            )
+          }
+        />
       )}
-
-      {sortedRows && <SettlementSummary rows={sortedRows} sections={sections} valueOf={getEffectiveValue} />}
 
       {error && <p className="px-5 py-3 text-sm text-[#ff4b4b]">{error}</p>}
 
@@ -1383,10 +1414,16 @@ export default function InvoiceTable({
             <tbody>
               {pagedRows.map((r) => {
                 const isExpanded = expanded.has(r.shpmId);
+                const isSelected = selectedIds.has(r.shpmId);
+                const bg = rowBgOf(r.shpmId);
                 return (
                   <Fragment key={r.shpmId}>
-                    <tr className="group/row bg-white hover:bg-gray-50/70">
-                      <td className={`${tdBase} ${frozen(null, rowBg).cls}`} style={{ ...tdBorder, ...frozen(null, rowBg).style }}>
+                    <tr className={`group/row ${isSelected ? "bg-[#eef4ff] hover:bg-[#e3ecfd]" : "bg-white hover:bg-gray-50/70"}`}>
+                      <td
+                        className={`${tdBase} ${frozen(null, bg).cls}`}
+                        // Blue bar on the left edge as well, so a checked row reads even where its cells are coloured.
+                        style={{ ...tdBorder, ...frozen(null, bg).style, ...(isSelected ? { boxShadow: "inset 3px 0 0 #3b82f6" } : null) }}
+                      >
                         <input type="checkbox" className={checkboxCls} checked={selectedIds.has(r.shpmId)} onChange={() => toggleSelect(r.shpmId)} />
                       </td>
                       {sections.map((s, si) => (
@@ -1397,8 +1434,8 @@ export default function InvoiceTable({
                                 key={c.key}
                                 onClick={() => toggleExpanded(r.shpmId)}
                                 onDoubleClick={() => startEdit({ ...c, editTarget: { kind: "master", field: "contNo" } }, r)}
-                                className={`${tdBase} cursor-pointer font-medium text-[#ff4b4b] hover:bg-gray-50 ${frozen(c.key, rowBg).cls}`}
-                                style={{ ...tdBorder, ...frozen(c.key, rowBg).style, ...(changeAt(r.shpmId, colLogTarget(c)) ? changedCellStyle : null) }}
+                                className={`${tdBase} cursor-pointer font-medium text-[#ff4b4b] hover:bg-gray-50 ${frozen(c.key, bg).cls}`}
+                                style={{ ...tdBorder, ...frozen(c.key, bg).style, ...(changeAt(r.shpmId, colLogTarget(c)) ? changedCellStyle : null) }}
                                 title={[
                                   "클릭: SKU 상세 펼치기 / 더블클릭: 수정",
                                   ...[changeAt(r.shpmId, colLogTarget(c))].filter((e) => e !== undefined).map((e) => changeTitle(e)),

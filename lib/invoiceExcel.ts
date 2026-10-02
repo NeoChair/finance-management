@@ -1,6 +1,15 @@
 import ExcelJS from "exceljs";
-import type { InvoiceRow } from "./invoice";
-import { getImportTarget, getImportValueKind, getInvoiceSections, type InvoiceColumn, type InvoiceSection } from "./invoiceColumns";
+import type { InvoiceRow, InvoiceSku } from "./invoice";
+import {
+  actualQtyIfDifferent,
+  getImportTarget,
+  getImportValueKind,
+  getInvoiceSections,
+  QTY_MISMATCH_BG,
+  QTY_MISMATCH_FG,
+  type InvoiceColumn,
+  type InvoiceSection,
+} from "./invoiceColumns";
 import type { ImportCell, UploadRow } from "./invoiceImport";
 
 // Download, template and upload all share one sheet layout, mirroring the on-screen table:
@@ -114,9 +123,18 @@ export async function buildInvoiceWorkbook(prdLineCd: string, rows: InvoiceRow[]
   }
 
   const columns = sections.flatMap((s) => s.columns);
+  const qtyColNo = columns.findIndex((c) => c.skuField === "qty") + 1;
+  // Same marking as the screen: QTY stays the declared figure, coloured when the loaded quantity differs.
+  const markQty = (line: ExcelJS.Row, mismatched: boolean) => {
+    if (!mismatched || qtyColNo === 0) return;
+    const cell = line.getCell(qtyColNo);
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: `FF${QTY_MISMATCH_BG.slice(1)}` } };
+    cell.font = { color: { argb: `FF${QTY_MISMATCH_FG.slice(1)}` } };
+  };
+  const mismatched = (sku: InvoiceSku) => actualQtyIfDifferent(sku, sku.qty) !== null;
   for (const row of rows) {
-    if (!detail) sheet.addRow(columns.map((c) => cellForDownload(c, row)));
-    else for (const line of sheetLines(columns, row)) sheet.addRow(line);
+    if (!detail) markQty(sheet.addRow(columns.map((c) => cellForDownload(c, row))), row.skuDetails.some(mismatched));
+    else sheetLines(columns, row).forEach((line, i) => markQty(sheet.addRow(line), !!row.skuDetails[i] && mismatched(row.skuDetails[i])));
   }
 
   return workbook.xlsx.writeBuffer();

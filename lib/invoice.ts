@@ -34,7 +34,10 @@ export type InvoiceSku = {
   shpmDtlId: number;
   skuCd: string;
   mdlNm: string | null;
+  /** Declared (customs) quantity — the figure shown everywhere. */
   qty: number | null;
+  /** Quantity actually loaded into the container; null = not recorded (same as declared). */
+  actlQty: number | null;
   unitPrc: number | null;
   amt: number | null;
   /** This SKU line's CBM. Kept per SKU only — no container-level CBM is stored. */
@@ -139,7 +142,7 @@ export async function getInvoicesByProductLine(prdLineCd: string): Promise<Invoi
     .request()
     .input("prdLineCd", sql.VarChar(20), prdLineCd)
     .query(
-      `SELECT d.SHPM_DTL_ID, d.SHPM_ID, d.SKU_CD, d.MDL_NM, d.QTY, d.UNIT_PRC, d.AMT, d.CBM
+      `SELECT d.SHPM_DTL_ID, d.SHPM_ID, d.SKU_CD, d.MDL_NM, d.QTY, d.ACTL_QTY, d.UNIT_PRC, d.AMT, d.CBM
        FROM FM.TB_SHPM_DTL d
        JOIN FM.TB_SHPM_MST s ON s.SHPM_ID = d.SHPM_ID
        WHERE s.PRD_LINE_CD = @prdLineCd AND d.INV_TP_CD = 'NEO'
@@ -184,6 +187,7 @@ export async function getInvoicesByProductLine(prdLineCd: string): Promise<Invoi
       skuCd: row.SKU_CD,
       mdlNm: row.MDL_NM,
       qty: row.QTY,
+      actlQty: row.ACTL_QTY,
       unitPrc: row.UNIT_PRC,
       amt: row.AMT,
       cbm: row.CBM,

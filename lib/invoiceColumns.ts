@@ -24,7 +24,7 @@ export type InvoiceColumn = {
   /** Explicit cell format — avoids guessing from the label text. */
   format?: "date";
   /** Marks which column an expanded SKU sub-row's value goes into (see InvoiceTable). */
-  skuField?: "sku" | "qty" | "amt";
+  skuField?: "sku" | "qty" | "amt" | "cbm";
   /** Present on amount/master columns that can be edited inline; absent = read-only. */
   editTarget?: EditTarget;
   /** Edited with a dropdown of the values already used in this same column (plus "직접 입력"). */
@@ -67,9 +67,10 @@ function costAmtCol(key: string, label: string, costTpCd: string, getter: (r: In
 // blank getValue so the layout still matches — nothing is invented.
 //
 // editTarget marks which cells are inline-editable in the UI and where an Excel-upload cell is
-// written: everything except the product Amount/QTY (the SUM of the SKU lines, edited per SKU)
-// and CONTAINER (edited via double-click). Shipper/Sender/Receiver/Buyer/Seller names use a
-// dropdown of used values.
+// written: everything except the product QTY (the SUM of the SKU lines, edited per SKU) and
+// CONTAINER (edited via double-click). The product Amount is entered per container (the NEO
+// invoice's AMT), not per SKU. Shipper/Sender/Receiver/Buyer/Seller names use a dropdown of
+// used values.
 
 // ============ CHAIR_TYJ — sheet "TYJ" in 2026_CHAIR_TYJ_INV.xlsx ============
 export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
@@ -94,7 +95,7 @@ export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "Product",
     columns: [
-      { key: "prodAmt", label: "Amount", align: "right", skuField: "amt", getValue: (r) => r.amt },
+      { key: "prodAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "prodQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "prodSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "prodRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
@@ -161,7 +162,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "NEO CHAIR -> HYGGE",
     columns: [
-      { key: "neoAmt", label: "Amount", align: "right", skuField: "amt", getValue: (r) => r.amt },
+      { key: "neoAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "neoQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "neoSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "neoRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
@@ -252,7 +253,7 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "NEO CHAIR -> HYGGE",
     columns: [
-      { key: "neoAmt", label: "Amount", align: "right", skuField: "amt", getValue: (r) => r.amt },
+      { key: "neoAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "neoQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "neoSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "neoRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
@@ -331,7 +332,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "ORANGE -> HYGGE",
     columns: [
-      { key: "ohAmt", label: "Amount", align: "right", skuField: "amt", getValue: (r) => r.amt },
+      { key: "ohAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "ohSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "ohRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
       { key: "ohPayDate", label: "Payment", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "NEO", field: "payDe" }, getValue: (r) => r.neoInv?.payDe ?? null },
@@ -450,10 +451,25 @@ export function getImportValueKind(col: InvoiceColumn): ImportValueKind {
   return t.field ? "text" : "number";
 }
 
+// CBM is stored per SKU line only (TB_SHPM_DTL.CBM) and edited in the expanded SKU rows, so it
+// sits right after the product QTY column. The shipment row itself shows no CBM.
+function withCbmColumn(sections: InvoiceSection[]): InvoiceSection[] {
+  return sections.map((s) => ({
+    ...s,
+    columns: s.columns.flatMap((c): InvoiceColumn[] =>
+      c.skuField === "qty" ? [c, { key: `${c.key}Cbm`, label: "CBM", align: "right", skuField: "cbm", getValue: () => null }] : [c]
+    ),
+  }));
+}
+
+// Built once so each product line keeps a stable sections array.
+const SECTIONS_BY_LINE: Record<string, InvoiceSection[]> = {
+  CHAIR_TYJ: withCbmColumn(CHAIR_TYJ_SECTIONS),
+  CHAIR: withCbmColumn(CHAIR_SECTIONS),
+  CHAIR_WF: withCbmColumn(CHAIR_WF_SECTIONS),
+  MATTRESS: withCbmColumn(MATTRESS_SECTIONS),
+};
+
 export function getInvoiceSections(prdLineCd: string): InvoiceSection[] {
-  if (prdLineCd === "CHAIR_TYJ") return CHAIR_TYJ_SECTIONS;
-  if (prdLineCd === "CHAIR") return CHAIR_SECTIONS;
-  if (prdLineCd === "CHAIR_WF") return CHAIR_WF_SECTIONS;
-  if (prdLineCd === "MATTRESS") return MATTRESS_SECTIONS;
-  return [];
+  return SECTIONS_BY_LINE[prdLineCd] ?? [];
 }

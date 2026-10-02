@@ -8,6 +8,15 @@ export async function proxy(req: NextRequest) {
 
   const isLoginPage = pathname === "/";
 
+  // API calls get a 401 instead of a redirect. Handlers that record who changed something still
+  // read the user themselves (getSessionUser), so they don't depend on this check alone.
+  if (pathname.startsWith("/api/")) {
+    if (!session && !pathname.startsWith("/api/auth/")) {
+      return NextResponse.json({ message: "로그인이 필요합니다." }, { status: 401 });
+    }
+    return NextResponse.next();
+  }
+
   if (!session && !isLoginPage) {
     return NextResponse.redirect(new URL("/", req.url));
   }
@@ -20,5 +29,5 @@ export async function proxy(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

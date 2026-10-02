@@ -30,7 +30,7 @@ export default function PageShell({ children }: { children: React.ReactNode }) {
   const icon = leaf?.icon ?? "fa-solid fa-file-lines";
 
   return (
-    <div className="flex flex-col gap-4 p-6 md:p-8">
+    <div className="flex flex-col gap-4 px-6 pb-6 pt-1 md:px-8 md:pb-8">
       <nav className="flex items-center gap-2 text-xs font-medium text-gray-400">
         <Link href="/home" className="flex items-center gap-1.5 hover:text-[#ff4b4b]">
           <i className="fa-solid fa-house text-[11px]" />

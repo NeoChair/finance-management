@@ -1,6 +1,6 @@
 import ExcelJS from "exceljs";
 import type { InvoiceRow } from "./invoice";
-import { getImportTarget, getImportValueKind, getInvoiceSections, type InvoiceColumn } from "./invoiceColumns";
+import { getImportTarget, getImportValueKind, getInvoiceSections, type InvoiceColumn, type InvoiceSection } from "./invoiceColumns";
 import type { ImportCell, UploadRow } from "./invoiceImport";
 
 // Download, template and upload all share one sheet layout, mirroring the on-screen table:
@@ -17,6 +17,17 @@ const thinBorder: Partial<ExcelJS.Borders> = {
   right: { style: "thin", color: { argb: "FF9CA3AF" } },
 };
 
+// The sheet has one line per SKU, so it carries an extra SKU-code column right after CONTAINER.
+// It isn't uploadable (SKU lines are edited on screen), so upload just skips it.
+const SKU_COL: InvoiceColumn = { key: "__skuCd", label: "SKU", getValue: () => null };
+
+function withSkuColumn(sections: InvoiceSection[]): InvoiceSection[] {
+  return sections.map((s) => ({
+    ...s,
+    columns: s.columns.flatMap((c) => (c.skuField === "sku" ? [c, SKU_COL] : [c])),
+  }));
+}
+
 function cellForDownload(col: InvoiceColumn, row: InvoiceRow): string | number | null {
   const value = col.getValue(row);
   if (value == null || value === "") return null;
@@ -27,9 +38,38 @@ function cellForDownload(col: InvoiceColumn, row: InvoiceRow): string | number |
   return value;
 }
 
-/** Builds the download file; with no rows it's the blank upload template. */
-export async function buildInvoiceWorkbook(prdLineCd: string, rows: InvoiceRow[]): Promise<ExcelJS.Buffer> {
-  const sections = getInvoiceSections(prdLineCd);
+// Shipment-level money (freight/duty/trucking… amounts): written on a shipment's first SKU line
+// only, so summing the column in Excel doesn't count it once per SKU.
+function isShipmentAmount(col: InvoiceColumn): boolean {
+  const t = col.editTarget;
+  return t !== undefined && t.kind !== "master" && !t.field;
+}
+
+/** One sheet line per SKU. QTY / CBM are that SKU's own values, amounts (the per-container
+ *  product Amount included) sit on the first line only, and everything else repeats on every
+ *  line so each line can be filtered/pivoted on its own. A shipment without SKUs gets a single line. */
+function sheetLines(columns: InvoiceColumn[], row: InvoiceRow): (string | number | null)[][] {
+  if (row.skuDetails.length === 0) return [columns.map((c) => cellForDownload(c, row))];
+  return row.skuDetails.map((sku, i) =>
+    columns.map((c) => {
+      if (c === SKU_COL) return sku.skuCd;
+      if (c.skuField === "qty") return sku.qty;
+      if (c.skuField === "cbm") return sku.cbm;
+      if (i > 0 && isShipmentAmount(c)) return null;
+      return cellForDownload(c, row);
+    })
+  );
+}
+
+/** Builds the download file; with no rows it's the blank upload template.
+ *  `detail` (Export Detail / template): one line per SKU, with the SKU and CBM columns.
+ *  Otherwise (Export): one line per shipment, product QTY as the SKU total and no
+ *  SKU/CBM columns — upload treats both as optional, so either file can be imported back. */
+export async function buildInvoiceWorkbook(prdLineCd: string, rows: InvoiceRow[], detail: boolean): Promise<ExcelJS.Buffer> {
+  const base = getInvoiceSections(prdLineCd);
+  const sections = detail
+    ? withSkuColumn(base)
+    : base.map((s) => ({ ...s, columns: s.columns.filter((c) => c.skuField !== "cbm") })).filter((s) => s.columns.length > 0);
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Sheet1", { views: [{ state: "frozen", ySplit: HEADER_ROWS }] });
 
@@ -67,14 +107,16 @@ export async function buildInvoiceWorkbook(prdLineCd: string, rows: InvoiceRow[]
   for (const section of sections) {
     for (const col of section.columns) {
       if (section.groupLabel !== null) sheet.getCell(1, colNo).fill = groupFill;
-      // Greyed header = not read on upload (product Amount/QTY come from the SKU lines).
+      // Greyed header = not read on upload (product QTY / CBM come from the SKU lines).
       if (!getImportTarget(col)) sheet.getCell(2, colNo).font = { bold: true, italic: true, color: { argb: "FF9CA3AF" } };
       colNo++;
     }
   }
 
+  const columns = sections.flatMap((s) => s.columns);
   for (const row of rows) {
-    sheet.addRow(sections.flatMap((s) => s.columns.map((c) => cellForDownload(c, row))));
+    if (!detail) sheet.addRow(columns.map((c) => cellForDownload(c, row)));
+    else for (const line of sheetLines(columns, row)) sheet.addRow(line);
   }
 
   return workbook.xlsx.writeBuffer();
@@ -109,7 +151,6 @@ function headerText(cell: ExcelJS.Cell): string {
 /** Reads an upload file's first sheet into rows keyed by column key. Throws (with a
  *  user-facing message) when the header doesn't match this product line's template. */
 export async function parseInvoiceWorkbook(prdLineCd: string, data: ArrayBuffer): Promise<UploadRow[]> {
-  const sections = getInvoiceSections(prdLineCd);
   const workbook = new ExcelJS.Workbook();
   try {
     await workbook.xlsx.load(data);
@@ -119,18 +160,24 @@ export async function parseInvoiceWorkbook(prdLineCd: string, data: ArrayBuffer)
   const sheet = workbook.worksheets[0];
   if (!sheet) throw new Error("시트가 없는 파일입니다.");
 
-  const columns: InvoiceColumn[] = [];
+  // The SKU and CBM columns are newer than some files in circulation and are never read on
+  // upload, so a file without them still matches: they're skipped when their header is absent.
+  const sections = withSkuColumn(getInvoiceSections(prdLineCd));
+  const isOptional = (col: InvoiceColumn) => col === SKU_COL || col.skuField === "cbm";
+
+  const columns: { col: InvoiceColumn; colNo: number }[] = [];
   let colNo = 1;
   for (const section of sections) {
     for (const col of section.columns) {
       // Row 2 carries the column label; fall back to row 1 for files with those two rows merged.
       const actual = headerText(sheet.getCell(2, colNo)) || headerText(sheet.getCell(1, colNo));
       if (actual !== col.label.replace(/\s+/g, " ").trim().toLowerCase()) {
+        if (isOptional(col)) continue;
         throw new Error(
           `양식이 다릅니다 (${sheet.getColumn(colNo).letter}열: "${col.label}" 자리에 "${actual}"). 양식을 다시 내려받아 작성해 주세요.`
         );
       }
-      columns.push(col);
+      columns.push({ col, colNo });
       colNo++;
     }
   }
@@ -139,10 +186,10 @@ export async function parseInvoiceWorkbook(prdLineCd: string, data: ArrayBuffer)
   for (let r = HEADER_ROWS + 1; r <= sheet.rowCount; r++) {
     const excelRow = sheet.getRow(r);
     const cells: UploadRow["cells"] = {};
-    columns.forEach((col, i) => {
-      const value = readCell(excelRow.getCell(i + 1));
+    for (const { col, colNo: c } of columns) {
+      const value = readCell(excelRow.getCell(c));
       if (value != null) cells[col.key] = value;
-    });
+    }
     if (Object.keys(cells).length > 0) rows.push({ rowNo: r, cells });
   }
   return rows;

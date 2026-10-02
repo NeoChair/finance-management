@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { importShipments, ImportRowError } from "@/lib/invoice";
 import { buildShipmentImports, type UploadRow } from "@/lib/invoiceImport";
-import { getSessionUser, unauthorized } from "@/lib/currentUser";
+import { forbidden, getSessionUser, unauthorized } from "@/lib/currentUser";
+import { isAdmin } from "@/lib/userPerms";
 import { slugToProductLine } from "@/lib/productLines";
 
 const OWNR_ETP_CD = "KR-DT-HG";
@@ -28,6 +29,7 @@ function parseUploadRows(body: unknown): UploadRow[] | null {
 export async function POST(req: NextRequest, { params }: { params: Promise<{ line: string }> }) {
   const user = await getSessionUser();
   if (!user) return unauthorized();
+  if (!isAdmin(user)) return forbidden("Import는 시스템 관리자만 할 수 있습니다.");
 
   const { line } = await params;
   const prdLineCd = slugToProductLine(line);

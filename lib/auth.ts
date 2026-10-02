@@ -4,7 +4,7 @@ import { encryptPassword } from "./passwordHash";
 const FINANCE_PERM_CD = "AP_FINANCE";
 
 export type AuthResult =
-  | { ok: true; user: { usrId: string; usrNm: string; usrTypCd: string; ownrEtpCd: string; email: string | null } }
+  | { ok: true; user: { usrId: string; usrNm: string; usrTypCd: string; ownrEtpCd: string; etpCd: string | null; email: string | null } }
   | { ok: false; reason: "NOT_FOUND" | "WRONG_PASSWORD" | "LOCKED" | "PW_INIT" | "PW_EXPIRED" | "NO_ACCESS" };
 
 // BC.TB_USR_MST is IHS's user table, so its login rules apply here too (IHS.WEB
@@ -32,6 +32,7 @@ type UserRow = {
   USR_PW: string;
   USR_TYP_CD: string;
   EMAIL: string | null;
+  ETP_CD: string | null;
   IS_PW_INIT: boolean | null;
   PW_CHG_DE: string | null;
   PW_ERR_CNT: number | null;
@@ -43,7 +44,7 @@ async function findUser(usrId: string): Promise<UserRow | undefined> {
     .request()
     .input("usrId", sql.VarChar(50), usrId)
     .query(
-      `SELECT TOP 1 OWNR_ETP_CD, USR_ID, USR_NM, USR_PW, USR_TYP_CD, EMAIL, IS_PW_INIT, PW_CHG_DE, PW_ERR_CNT
+      `SELECT TOP 1 OWNR_ETP_CD, USR_ID, USR_NM, USR_PW, USR_TYP_CD, EMAIL, ETP_CD, IS_PW_INIT, PW_CHG_DE, PW_ERR_CNT
        FROM BC.TB_USR_MST
        WHERE USR_ID = @usrId AND IS_USE = 1`
     );
@@ -109,6 +110,7 @@ export async function verifyCredentials(usrId: string, password: string): Promis
       usrNm: row.USR_NM,
       usrTypCd: row.USR_TYP_CD,
       ownrEtpCd: row.OWNR_ETP_CD,
+      etpCd: row.ETP_CD ?? null,
       email: row.EMAIL ?? null,
     },
   };

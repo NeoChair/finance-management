@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sidebarMenu, type SidebarMenuItem } from "@/app/data/sidebarMenu";
+import { useEditPerms } from "./UserProvider";
 
 function SidebarArrowIcon({ className = "" }) {
     return (
@@ -124,7 +125,11 @@ export default function Sidebar() {
         };
     }, []);
 
-    const menu = useMemo(() => sidebarMenu, []);
+    const perms = useEditPerms();
+    const menu = useMemo(
+        () => sidebarMenu.filter((item) => !item.adminOnly || perms.admin),
+        [perms]
+    );
 
     return (
         <div

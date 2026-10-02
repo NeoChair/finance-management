@@ -6,6 +6,8 @@ import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
 import ColumnFilterMenu from "./ColumnFilterMenu";
 import ChangeLogModal from "./ChangeLogModal";
 import SettlementSummary from "./SettlementSummary";
+import { useEditPerms } from "./UserProvider";
+import { canEdit, PERM_LABELS } from "@/lib/permissions";
 import { logCellKey, logTargetOf, skuLogTarget, type ChangeLogEntry, type LogTarget, type SkuField } from "@/lib/invoiceFields";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
 
@@ -152,6 +154,11 @@ export default function InvoiceTable({
   fileName: string;
   prdLineCd: string;
 }) {
+  // Column permissions (see lib/permissions): cells open for editing only where allowed; adding,
+  // deleting and Import are for system admins. The server checks all of it again.
+  const perms = useEditPerms();
+  const skuEditable = canEdit(perms, "sku");
+  const canSave = perms.admin || perms.codes.length > 0;
   const [rows, setRows] = useState<InvoiceRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -294,7 +301,7 @@ export default function InvoiceTable({
   }
 
   function startEdit(col: InvoiceColumn, row: InvoiceRow) {
-    if (!col.editTarget) return;
+    if (!col.editTarget || !canEdit(perms, col.editTarget)) return;
     manualEntryRef.current = false;
     setManualEntry(false);
     editingKeyRef.current = `${row.shpmId}:${col.key}`;
@@ -352,7 +359,7 @@ export default function InvoiceTable({
   // the neighbouring row at the ends; arrow keys stop at the table edge.
   function moveEdit(col: InvoiceColumn, row: InvoiceRow, dir: MoveDir) {
     if (!pagedRows) return;
-    const editable = allColumns.filter((c) => c.editTarget);
+    const editable = allColumns.filter((c) => c.editTarget && canEdit(perms, c.editTarget));
     let ci = editable.findIndex((c) => c.key === col.key);
     let ri = pagedRows.findIndex((r) => r.shpmId === row.shpmId);
     if (ci < 0 || ri < 0) return;
@@ -501,6 +508,7 @@ export default function InvoiceTable({
   }
 
   function startEditSku(sku: InvoiceSku, field: SkuField) {
+    if (!skuEditable) return;
     const raw = getEffectiveSkuValue(sku, field);
     openSkuEditor(sku.shpmDtlId, field, raw == null ? "" : String(raw));
   }
@@ -911,7 +919,8 @@ export default function InvoiceTable({
   function renderCell(col: InvoiceColumn, row: InvoiceRow) {
     const isEditing = editingCell?.shpmId === row.shpmId && editingCell?.colKey === col.key;
     const isPending = `${row.shpmId}:${col.key}` in pendingCellEdits;
-    const cellCls = `${tdBase} ${col.align === "right" ? "text-right" : ""} ${col.editTarget ? "cursor-pointer hover:bg-gray-50" : ""}`;
+    const editableCell = !!col.editTarget && canEdit(perms, col.editTarget);
+    const cellCls = `${tdBase} ${col.align === "right" ? "text-right" : ""} ${editableCell ? "cursor-pointer hover:bg-gray-50" : ""}`;
     const fz = frozen(col.key, rowBg);
 
     if (isEditing && col.select === "used" && col.editTarget && !manualEntry) {
@@ -1081,14 +1090,16 @@ export default function InvoiceTable({
               ) : (
                 // The whole space left of the trash icon is the click target, and a blank code
                 // shows a placeholder — otherwise an empty code has nothing to click on.
-                <span className="min-w-[60px] flex-1 cursor-pointer hover:text-[#ff4b4b]" onClick={() => startEditSku(sku, "skuCd")}>
-                  {getEffectiveSkuValue(sku, "skuCd") || <span className="text-gray-300">(SKU 입력)</span>}
+                <span className={`min-w-[60px] flex-1 ${skuEditable ? "cursor-pointer hover:text-[#ff4b4b]" : ""}`} onClick={() => startEditSku(sku, "skuCd")}>
+                  {getEffectiveSkuValue(sku, "skuCd") || (skuEditable && <span className="text-gray-300">(SKU 입력)</span>)}
                 </span>
               )}
             </span>
-            <button onClick={() => handleDeleteSku(shpmId, sku)} className="shrink-0 text-gray-300 hover:text-[#ff4b4b]" title="SKU 삭제">
-              <i className="fa-solid fa-trash text-[10px]" />
-            </button>
+            {perms.admin && (
+              <button onClick={() => handleDeleteSku(shpmId, sku)} className="shrink-0 text-gray-300 hover:text-[#ff4b4b]" title="SKU 삭제">
+                <i className="fa-solid fa-trash text-[10px]" />
+              </button>
+            )}
           </div>
         </td>
       );
@@ -1110,7 +1121,7 @@ export default function InvoiceTable({
       return (
         <td
           key={col.key}
-          className={`${tdBase} cursor-pointer text-right hover:bg-gray-50 ${fz.cls}`}
+          className={`${tdBase} text-right ${skuEditable ? "cursor-pointer hover:bg-gray-50" : ""} ${fz.cls}`}
           style={{ ...tdBorder, ...fz.style, ...(changed ? changedCellStyle : null) }}
           title={changed ? changeTitle(changed, col) : undefined}
           onClick={() => startEditSku(sku, field)}
@@ -1128,7 +1139,13 @@ export default function InvoiceTable({
     <div className="flex flex-col">
       <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-5 py-3.5">
         <p className="text-xs text-gray-400">
-          {rows ? "셀을 클릭해 수정 · Enter/포커스 아웃 시 임시 반영 · 저장 버튼을 눌러야 서버에 반영됩니다" : error ? "" : "불러오는 중..."}
+          {!rows
+            ? error ? "" : "불러오는 중..."
+            : !canSave
+              ? "읽기 전용입니다 · 수정 권한은 시스템 관리자에게 요청하세요"
+              : perms.admin
+                ? "셀을 클릭해 수정 · Enter/포커스 아웃 시 임시 반영 · 저장 버튼을 눌러야 서버에 반영됩니다"
+                : `${perms.codes.map((p) => PERM_LABELS[p]).join(", ")} 권한 · 해당 칸만 수정할 수 있습니다 · 저장 버튼을 눌러야 반영됩니다`}
         </p>
         {rows && (
           <div className="flex items-center gap-2">
@@ -1139,18 +1156,24 @@ export default function InvoiceTable({
                 필터 초기화 ({activeFilterCount})
               </button>
             )}
-            <button onClick={handleSaveAll} className={toolbarBtnCls}>
-              <i className="fa-solid fa-floppy-disk text-xs" />
-              저장
-            </button>
-            <button onClick={handleBulkDelete} className={toolbarBtnCls}>
-              <i className="fa-solid fa-trash text-xs" />
-              삭제{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
-            </button>
-            <button onClick={handleAddRow} className={toolbarBtnCls}>
-              <i className="fa-solid fa-plus text-xs" />
-              추가
-            </button>
+            {canSave && (
+              <button onClick={handleSaveAll} className={toolbarBtnCls}>
+                <i className="fa-solid fa-floppy-disk text-xs" />
+                저장
+              </button>
+            )}
+            {perms.admin && (
+              <button onClick={handleBulkDelete} className={toolbarBtnCls}>
+                <i className="fa-solid fa-trash text-xs" />
+                삭제{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
+              </button>
+            )}
+            {perms.admin && (
+              <button onClick={handleAddRow} className={toolbarBtnCls}>
+                <i className="fa-solid fa-plus text-xs" />
+                추가
+              </button>
+            )}
             <div className="relative">
               <button onClick={() => setDownloadMenuOpen((open) => !open)} className={toolbarBtnCls}>
                 <i className="fa-solid fa-download text-xs" />
@@ -1181,7 +1204,7 @@ export default function InvoiceTable({
                 </>
               )}
             </div>
-            <div className="relative">
+            <div className={`relative ${perms.admin ? "" : "hidden"}`}>
               <button onClick={() => setUploadMenuOpen((open) => !open)} className={toolbarBtnCls}>
                 <i className="fa-solid fa-upload text-xs" />
                 Import
@@ -1429,7 +1452,7 @@ export default function InvoiceTable({
                           <td className={tdBase} style={tdBorder} />
                         </tr>
                       ))}
-                    {isExpanded && (
+                    {isExpanded && perms.admin && (
                       <tr className="bg-gray-50/60">
                         <td className={`${tdBase} ${frozen(null, subRowBg).cls}`} style={{ ...tdBorder, ...frozen(null, subRowBg).style }} />
                         <td colSpan={totalCols} className={tdBase} style={tdBorder}>

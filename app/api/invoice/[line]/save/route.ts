@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveEdits, type FieldEdit, type PartyField, type SkuFieldEdit } from "@/lib/invoice";
 import { MASTER_FIELD_COLUMNS, PARTY_FIELD_COLUMNS } from "@/lib/invoiceFields";
-import { getSessionUser, unauthorized } from "@/lib/currentUser";
+import { forbidden, getSessionUser, unauthorized } from "@/lib/currentUser";
+import { canEdit } from "@/lib/permissions";
+import { getEditPerms } from "@/lib/userPerms";
 import { slugToProductLine } from "@/lib/productLines";
 
 function parseFieldEdit(b: Record<string, unknown>): FieldEdit | null {
@@ -60,6 +62,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ lin
     const edit = parseSkuEdit(rest);
     if (!Number.isInteger(shpmDtlId) || !edit) return NextResponse.json({ message: "잘못된 요청입니다." }, { status: 400 });
     skus.push({ shpmDtlId: shpmDtlId as number, edit });
+  }
+
+  // Column permissions: the client only opens permitted cells, but every edit is checked here.
+  try {
+    const perms = await getEditPerms(user);
+    if (cells.some((c) => !canEdit(perms, c.edit)) || (skus.length > 0 && !canEdit(perms, "sku"))) {
+      return forbidden("수정 권한이 없는 항목이 포함되어 있어 저장하지 않았습니다.");
+    }
+  } catch (err) {
+    console.error(`[api/invoice/${line}/save] permission check error:`, err);
+    return NextResponse.json({ message: "권한 확인에 실패했습니다." }, { status: 500 });
   }
 
   try {

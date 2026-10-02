@@ -74,7 +74,7 @@ export default function ProfileMenu() {
             <dt className="text-gray-400">아이디</dt>
             <dd className="truncate text-gray-700">{user.usrId}</dd>
             <dt className="text-gray-400">회사</dt>
-            <dd className="truncate text-gray-700">{user.ownrEtpCd}</dd>
+            <dd className="truncate text-gray-700">{user.etpCd || "-"}</dd>
             <dt className="text-gray-400">권한</dt>
             <dd className="truncate text-gray-700" title={user.usrTypCd}>
               {USER_TYPE_NAMES[user.usrTypCd] ?? user.usrTypCd}

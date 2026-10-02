@@ -9,6 +9,8 @@ export type SidebarMenuItem = {
     controller?: string;
     children?: SidebarMenuItem[];
     allowedUsers?: string[];
+    /** Shown to system admins (UTADMN) only. */
+    adminOnly?: boolean;
 };
 
 export const sidebarMenu: SidebarMenuItem[] = [
@@ -50,6 +52,22 @@ export const sidebarMenu: SidebarMenuItem[] = [
                 "icon": "fa-solid fa-file-invoice",
                 "text": "Invoice - TYJ",
                 "text_en": "Invoice - TYJ"
+            }
+        ]
+    },
+    {
+        "controller": "Settings",
+        "icon": "fa-solid fa-gear",
+        "text": "설정",
+        "text_en": "Settings",
+        "adminOnly": true,
+        "children": [
+            {
+                "action": "PermissionMng",
+                "page": "/Settings/Permission/",
+                "icon": "fa-solid fa-user-shield",
+                "text": "권한 관리",
+                "text_en": "Permission Management"
             }
         ]
     },

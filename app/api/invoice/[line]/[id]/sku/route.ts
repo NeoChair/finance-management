@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSku } from "@/lib/invoice";
-import { getSessionUser, unauthorized } from "@/lib/currentUser";
+import { forbidden, getSessionUser, unauthorized } from "@/lib/currentUser";
+import { isAdmin } from "@/lib/userPerms";
 
 export async function POST(_req: NextRequest, { params }: { params: Promise<{ line: string; id: string }> }) {
   const user = await getSessionUser();
   if (!user) return unauthorized();
+  if (!isAdmin(user)) return forbidden("SKU 추가는 시스템 관리자만 할 수 있습니다.");
 
   const { line, id } = await params;
   const shpmId = Number(id);

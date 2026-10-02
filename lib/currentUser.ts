@@ -11,3 +11,7 @@ export async function getSessionUser(): Promise<SessionUser | null> {
 export function unauthorized() {
   return NextResponse.json({ message: "로그인이 필요합니다." }, { status: 401 });
 }
+
+export function forbidden(message = "권한이 없습니다. 시스템 관리자에게 문의하세요.") {
+  return NextResponse.json({ message }, { status: 403 });
+}

@@ -5,6 +5,8 @@ export type SessionUser = {
   usrNm: string;
   usrTypCd: string;
   ownrEtpCd: string;
+  /** The user's own company (TB_USR_MST.ETP_CD). Missing in sessions from before it was added. */
+  etpCd?: string | null;
   email: string | null;
 };
 

@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getInvoicesByProductLine, createShipment, type ShipmentInput } from "@/lib/invoice";
-import { getSessionUser, unauthorized } from "@/lib/currentUser";
+import { forbidden, getSessionUser, unauthorized } from "@/lib/currentUser";
+import { isAdmin } from "@/lib/userPerms";
 import { slugToProductLine } from "@/lib/productLines";
 
 const OWNR_ETP_CD = "KR-DT-HG";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ line: string }> }) {
+  const user = await getSessionUser();
+  if (!user) return unauthorized();
+
   const { line } = await params;
   const prdLineCd = slugToProductLine(line);
   if (!prdLineCd) return NextResponse.json({ message: "알 수 없는 제품군입니다." }, { status: 404 });
@@ -22,6 +26,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ lin
 export async function POST(req: NextRequest, { params }: { params: Promise<{ line: string }> }) {
   const user = await getSessionUser();
   if (!user) return unauthorized();
+  if (!isAdmin(user)) return forbidden("행 추가는 시스템 관리자만 할 수 있습니다.");
 
   const { line } = await params;
   const prdLineCd = slugToProductLine(line);

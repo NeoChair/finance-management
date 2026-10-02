@@ -23,7 +23,9 @@ export type InvoiceColumn = {
   align?: "right";
   /** Explicit cell format — avoids guessing from the label text. */
   format?: "date";
-  /** Marks which column an expanded SKU sub-row's value goes into (see InvoiceTable). */
+  /** Marks which column an expanded SKU sub-row's value goes into (see InvoiceTable). A column
+   *  may also have an editTarget: the product Amount shows the invoice amount on the shipment
+   *  row and each SKU line's own amount on the SKU sub-rows. */
   skuField?: "sku" | "qty" | "amt" | "cbm";
   /** Present on amount/master columns that can be edited inline; absent = read-only. */
   editTarget?: EditTarget;
@@ -38,7 +40,18 @@ export type InvoiceSection = {
   columns: InvoiceColumn[];
 };
 
-function cost(cd: string): (r: InvoiceRow) => InvoiceCost | undefined {
+/** Excel's "light red fill, dark red text" — marks a QTY whose actual loaded quantity
+ *  (ACTL_QTY) differs from the declared one. */
+export const QTY_MISMATCH_BG = "#FFC7CE";
+export const QTY_MISMATCH_FG = "#9C0006";
+
+/** The SKU's actual loaded quantity when it differs from `qty` (the declared quantity, or its
+ *  unsaved edit); null when they match or no actual quantity was recorded. */
+export function actualQtyIfDifferent(sku: { actlQty: number | null }, qty: number | null): number | null {
+  return sku.actlQty != null && Number(sku.actlQty) !== Number(qty ?? 0) ? sku.actlQty : null;
+}
+
+function cost(cd: string):(r: InvoiceRow) => InvoiceCost | undefined {
   return (r) => r.costs.find((c) => c.costTpCd === cd);
 }
 
@@ -95,7 +108,7 @@ export const CHAIR_TYJ_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "Product",
     columns: [
-      { key: "prodAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
+      { key: "prodAmt", label: "Amount", align: "right", skuField: "amt", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "prodQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "prodSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "prodRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
@@ -162,7 +175,7 @@ export const CHAIR_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "NEO CHAIR -> HYGGE",
     columns: [
-      { key: "neoAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
+      { key: "neoAmt", label: "Amount", align: "right", skuField: "amt", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "neoQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "neoSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "neoRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
@@ -253,7 +266,7 @@ export const CHAIR_WF_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "NEO CHAIR -> HYGGE",
     columns: [
-      { key: "neoAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
+      { key: "neoAmt", label: "Amount", align: "right", skuField: "amt", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "neoQty", label: "QTY", align: "right", skuField: "qty", getValue: (r) => r.qty },
       { key: "neoSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "neoRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
@@ -332,7 +345,7 @@ export const MATTRESS_SECTIONS: InvoiceSection[] = [
   {
     groupLabel: "ORANGE -> HYGGE",
     columns: [
-      { key: "ohAmt", label: "Amount", align: "right", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
+      { key: "ohAmt", label: "Amount", align: "right", skuField: "amt", editTarget: { kind: "party", invTpCd: "NEO" }, getValue: (r) => r.neoInv?.amt ?? null },
       { key: "ohSender", label: "SENDER", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "sndrNm" }, getValue: (r) => r.neoInv?.sndrNm ?? null },
       { key: "ohRcver", label: "RCVer", select: "used", editTarget: { kind: "party", invTpCd: "NEO", field: "rcvrNm" }, getValue: (r) => r.neoInv?.rcvrNm ?? null },
       { key: "ohPayDate", label: "Payment", align: "right", format: "date", editTarget: { kind: "party", invTpCd: "NEO", field: "payDe" }, getValue: (r) => r.neoInv?.payDe ?? null },

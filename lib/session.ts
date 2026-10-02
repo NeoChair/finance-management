@@ -29,4 +29,13 @@ export async function verifySessionToken(token: string): Promise<SessionUser | n
   }
 }
 
+/** Cookie options for the session token (login and first-login password change). */
+export const SESSION_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax" as const,
+  path: "/",
+  maxAge: 60 * 60 * 12,
+};
+
 export { SESSION_COOKIE };

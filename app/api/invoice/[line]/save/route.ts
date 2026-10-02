@@ -25,7 +25,7 @@ function parseFieldEdit(b: Record<string, unknown>): FieldEdit | null {
 }
 
 function parseSkuEdit(b: Record<string, unknown>): SkuFieldEdit | null {
-  if (b.field !== "skuCd" && b.field !== "qty" && b.field !== "unitPrc" && b.field !== "amt") return null;
+  if (b.field !== "skuCd" && b.field !== "qty" && b.field !== "unitPrc" && b.field !== "amt" && b.field !== "cbm") return null;
   return { field: b.field, value: (b.value as string | number | null) ?? null };
 }
 

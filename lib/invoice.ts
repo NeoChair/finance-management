@@ -37,6 +37,8 @@ export type InvoiceSku = {
   qty: number | null;
   unitPrc: number | null;
   amt: number | null;
+  /** This SKU line's CBM. Kept per SKU only — no container-level CBM is stored. */
+  cbm: number | null;
 };
 
 export type InvoiceRow = {
@@ -137,7 +139,7 @@ export async function getInvoicesByProductLine(prdLineCd: string): Promise<Invoi
     .request()
     .input("prdLineCd", sql.VarChar(20), prdLineCd)
     .query(
-      `SELECT d.SHPM_DTL_ID, d.SHPM_ID, d.SKU_CD, d.MDL_NM, d.QTY, d.UNIT_PRC, d.AMT
+      `SELECT d.SHPM_DTL_ID, d.SHPM_ID, d.SKU_CD, d.MDL_NM, d.QTY, d.UNIT_PRC, d.AMT, d.CBM
        FROM FM.TB_SHPM_DTL d
        JOIN FM.TB_SHPM_MST s ON s.SHPM_ID = d.SHPM_ID
        WHERE s.PRD_LINE_CD = @prdLineCd AND d.INV_TP_CD = 'NEO'
@@ -184,6 +186,7 @@ export async function getInvoicesByProductLine(prdLineCd: string): Promise<Invoi
       qty: row.QTY,
       unitPrc: row.UNIT_PRC,
       amt: row.AMT,
+      cbm: row.CBM,
     });
     skuByShpm.set(row.SHPM_ID, list);
   }
@@ -499,7 +502,7 @@ export async function saveEdits(
       const row = res.recordset[0];
       if (!row) throw new Error(`이미 삭제되었거나 없는 SKU입니다 (ID ${shpmDtlId}). 새로고침 후 다시 시도해 주세요.`);
 
-      // SKU code / QTY / AMT are NOT NULL (blank → "" / 0); unit price may be null.
+      // SKU code / QTY / AMT are NOT NULL (blank → "" / 0); unit price and CBM may be null.
       const [type, value] =
         edit.field === "skuCd"
           ? [sql.VarChar(50), String(edit.value ?? "")]

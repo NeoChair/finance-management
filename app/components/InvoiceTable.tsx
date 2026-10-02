@@ -5,7 +5,8 @@ import type { InvoiceRow, InvoiceSku } from "@/lib/invoice";
 import { buildInvoiceWorkbook, parseInvoiceWorkbook } from "@/lib/invoiceExcel";
 import ColumnFilterMenu from "./ColumnFilterMenu";
 import ChangeLogModal from "./ChangeLogModal";
-import { logCellKey, logTargetOf, skuLogTarget, type ChangeLogEntry, type LogTarget } from "@/lib/invoiceFields";
+import SettlementSummary from "./SettlementSummary";
+import { logCellKey, logTargetOf, skuLogTarget, type ChangeLogEntry, type LogTarget, type SkuField } from "@/lib/invoiceFields";
 import { getInvoiceSections, optionKey, type EditTarget, type InvoiceColumn } from "@/lib/invoiceColumns";
 
 function formatDate(v: string | null): string {
@@ -76,6 +77,7 @@ function formatCell(col: InvoiceColumn, value: string | number | null): string {
     return s.length === 8 ? formatDate(s) : s; // show malformed values as-is rather than blank
   }
   if (col.label === "QTY" || col.label === "USD") return String(value);
+  if (col.skuField === "cbm") return formatCbm(Number(value));
   if (col.align === "right") return Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return String(value);
 }
@@ -98,7 +100,7 @@ const thSum = "sticky z-10 px-2.5 py-1.5 whitespace-nowrap text-left text-[13px]
 const checkboxCls = "h-4 w-4 cursor-pointer rounded border-gray-300 accent-[#ff4b4b]";
 // Toolbar buttons share one look: outlined, Font Awesome icon + label, brand colour on hover.
 const toolbarBtnCls =
-  "inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-600 hover:border-[#ff4b4b] hover:text-[#ff4b4b]";
+  "inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3.5 text-sm text-gray-600 hover:border-[#ff4b4b] hover:text-[#ff4b4b]";
 // Unsaved-edit indicator — always an inline dot placed right before the value, never
 // absolutely positioned, so it can never sit on top of other content (e.g. a delete button)
 // regardless of which cell it appears in.
@@ -121,13 +123,21 @@ const selectEditCls =
   "absolute inset-0 h-full w-full border-0 bg-transparent p-0 text-[13px] text-gray-800 outline-none cursor-pointer [&>option]:text-[15px]";
 
 type EditingCell = { shpmId: number; colKey: string };
-type SkuField = "skuCd" | "qty" | "unitPrc" | "amt";
+// A SKU line's stored value for one field.
+function skuValue(sku: InvoiceSku, field: SkuField): string | number | null {
+  return field === "skuCd" ? sku.skuCd : sku[field];
+}
 type EditingSku = { shpmDtlId: number; field: SkuField };
 type PendingCellEdit = { shpmId: number; editTarget: EditTarget; value: string | number | null };
 type PendingSkuEdit = { shpmId: number; shpmDtlId: number; field: SkuField; value: string | number | null };
 
 function formatSkuAmt(v: number | null): string {
   return v != null ? v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "";
+}
+
+// CBM is DECIMAL(18,4): show up to 4 decimals, without padding zeros.
+function formatCbm(v: number | null): string {
+  return v != null ? v.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "";
 }
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
@@ -184,6 +194,7 @@ export default function InvoiceTable({
   const historyRef = useRef<{ cell: Record<string, PendingCellEdit>; sku: Record<string, PendingSkuEdit> }[]>([]);
   const undoRef = useRef<() => void>(() => {});
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadPartyOptions = useCallback(() => {
@@ -254,7 +265,7 @@ export default function InvoiceTable({
   function getEffectiveSkuValue(sku: InvoiceSku, field: SkuField): string | number | null {
     const pending = pendingSkuEdits[`${sku.shpmDtlId}:${field}`];
     if (pending) return pending.value;
-    return field === "skuCd" ? sku.skuCd : field === "qty" ? sku.qty : field === "unitPrc" ? sku.unitPrc : sku.amt;
+    return skuValue(sku, field);
   }
 
   // Snapshot of both pending maps before each change, for Ctrl+Z. Cleared on save / row delete,
@@ -442,6 +453,12 @@ export default function InvoiceTable({
       alert("저장할 변경사항이 없습니다.");
       return;
     }
+    // SKU code is the line's identity — a blank one leaves a SKU nobody can find or tell apart.
+    const blankSkus = skuEdits.filter((e) => e.field === "skuCd" && (e.value == null || String(e.value).trim() === ""));
+    if (blankSkus.length > 0) {
+      alert(`SKU 코드가 비어 있는 항목이 ${blankSkus.length}건 있습니다.\nSKU 코드를 입력한 뒤 다시 저장해 주세요.`);
+      return;
+    }
     const badDates = Object.entries(pendingCellEdits).filter(([key, e]) =>
       isInvalidDate(allColumns.find((c) => c.key === key.slice(key.indexOf(":") + 1)), e.value)
     );
@@ -500,7 +517,7 @@ export default function InvoiceTable({
     if (field !== "skuCd" && skuDraft !== "" && isNaN(Number(skuDraft))) return; // half-typed number
     const value: string | number | null = skuDraft === "" ? null : field === "skuCd" ? skuDraft : Number(skuDraft);
     const sku = rows?.find((r) => r.shpmId === shpmId)?.skuDetails.find((s) => s.shpmDtlId === shpmDtlId);
-    const original = !sku ? undefined : field === "skuCd" ? sku.skuCd : field === "qty" ? sku.qty : field === "unitPrc" ? sku.unitPrc : sku.amt;
+    const original = sku ? skuValue(sku, field) : undefined;
     if (original !== undefined && sameValue(value, original)) {
       if (!(key in pendingSkuEdits)) return;
       recordHistory();
@@ -519,7 +536,7 @@ export default function InvoiceTable({
     const skus = rows?.find((r) => r.shpmId === shpmId)?.skuDetails;
     if (!skus) return;
     const fields = allColumns.flatMap((c): SkuField[] =>
-      c.skuField === "sku" ? ["skuCd"] : c.skuField === "qty" || c.skuField === "amt" ? [c.skuField] : []
+      c.skuField === "sku" ? ["skuCd"] : c.skuField ? [c.skuField] : []
     );
     let ci = fields.indexOf(field);
     let ri = skus.findIndex((s) => s.shpmDtlId === shpmDtlId);
@@ -719,7 +736,6 @@ export default function InvoiceTable({
   }
   const rowBg = "bg-white group-hover/row:bg-gray-50";
   const subRowBg = "bg-gray-50";
-  const pendingCount = Object.keys(pendingCellEdits).length + Object.keys(pendingSkuEdits).length;
   const activeFilterCount = Object.keys(columnFilters).length;
   const lastSaveInfo: ChangeLogEntry | undefined = lastSave.values().next().value;
 
@@ -807,8 +823,8 @@ export default function InvoiceTable({
 
   // The download and the blank template share one layout, so a downloaded file can be edited
   // and uploaded back as-is.
-  async function saveWorkbook(dataRows: InvoiceRow[], name: string) {
-    const buffer = await buildInvoiceWorkbook(prdLineCd, dataRows);
+  async function saveWorkbook(dataRows: InvoiceRow[], name: string, detail: boolean) {
+    const buffer = await buildInvoiceWorkbook(prdLineCd, dataRows, detail);
     const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -819,15 +835,23 @@ export default function InvoiceTable({
   }
 
   // Ticked rows only; nothing ticked = every row the filters leave, in the on-screen order.
-  async function handleDownload() {
-    if (!rows || !sortedRows) return;
-    const picked = rows.filter((r) => selectedIds.has(r.shpmId));
-    await saveWorkbook(picked.length > 0 ? picked : sortedRows, fileName);
+  const exportRows = (() => {
+    const picked = rows?.filter((r) => selectedIds.has(r.shpmId)) ?? [];
+    return picked.length > 0 ? picked : (sortedRows ?? []);
+  })();
+  const exportScope =
+    selectedIds.size > 0 ? `선택한 ${exportRows.length}건` : activeFilterCount > 0 ? `필터 결과 ${exportRows.length}건` : `전체 ${exportRows.length}건`;
+
+  // Export = one line per shipment; Export Detail = one line per SKU (with SKU / CBM columns).
+  async function handleDownload(detail: boolean) {
+    setDownloadMenuOpen(false);
+    if (!rows) return;
+    await saveWorkbook(exportRows, detail ? `${fileName}_detail` : fileName, detail);
   }
 
   async function handleTemplateDownload() {
     setUploadMenuOpen(false);
-    await saveWorkbook([], `${fileName}_template`);
+    await saveWorkbook([], `${fileName}_template`, true);
   }
 
   async function handleUploadFile(file: File) {
@@ -1050,13 +1074,15 @@ export default function InvoiceTable({
           title={codeChanged ? changeTitle(codeChanged) : undefined}
         >
           <div className="flex items-center justify-between gap-1.5">
-            <span className="flex items-center">
+            <span className="flex min-w-0 flex-1 items-center">
               {codePending && pendingDot}
               {editingCode ? (
                 skuInput("skuCd", shpmId, sku.shpmDtlId, inlineEditCls)
               ) : (
-                <span className="cursor-pointer hover:text-[#ff4b4b]" onClick={() => startEditSku(sku, "skuCd")}>
-                  {getEffectiveSkuValue(sku, "skuCd")}
+                // The whole space left of the trash icon is the click target, and a blank code
+                // shows a placeholder — otherwise an empty code has nothing to click on.
+                <span className="min-w-[60px] flex-1 cursor-pointer hover:text-[#ff4b4b]" onClick={() => startEditSku(sku, "skuCd")}>
+                  {getEffectiveSkuValue(sku, "skuCd") || <span className="text-gray-300">(SKU 입력)</span>}
                 </span>
               )}
             </span>
@@ -1068,7 +1094,7 @@ export default function InvoiceTable({
       );
     }
 
-    if (col.skuField === "qty" || col.skuField === "amt") {
+    if (col.skuField === "qty" || col.skuField === "amt" || col.skuField === "cbm") {
       const field = col.skuField;
       const isEditing = editingSku?.shpmDtlId === sku.shpmDtlId && editingSku.field === field;
       const isPending = `${sku.shpmDtlId}:${field}` in pendingSkuEdits;
@@ -1090,7 +1116,7 @@ export default function InvoiceTable({
           onClick={() => startEditSku(sku, field)}
         >
           {isPending && pendingDot}
-          {value != null ? (field === "amt" ? formatSkuAmt(value as number) : String(value)) : ""}
+          {value != null ? (field === "amt" ? formatSkuAmt(value as number) : field === "cbm" ? formatCbm(value as number) : String(value)) : ""}
         </td>
       );
     }
@@ -1115,7 +1141,7 @@ export default function InvoiceTable({
             )}
             <button onClick={handleSaveAll} className={toolbarBtnCls}>
               <i className="fa-solid fa-floppy-disk text-xs" />
-              저장{pendingCount > 0 ? ` (${pendingCount})` : ""}
+              저장
             </button>
             <button onClick={handleBulkDelete} className={toolbarBtnCls}>
               <i className="fa-solid fa-trash text-xs" />
@@ -1125,18 +1151,40 @@ export default function InvoiceTable({
               <i className="fa-solid fa-plus text-xs" />
               추가
             </button>
-            <button onClick={handleDownload} className={toolbarBtnCls}>
-              <i className="fa-solid fa-download text-xs" />
-              {selectedIds.size > 0
-                ? `선택 내려받기 (${selectedIds.size})`
-                : activeFilterCount > 0
-                  ? `필터 결과 내려받기 (${sortedRows?.length ?? 0})`
-                  : "엑셀 내려받기"}
-            </button>
+            <div className="relative">
+              <button onClick={() => setDownloadMenuOpen((open) => !open)} className={toolbarBtnCls}>
+                <i className="fa-solid fa-download text-xs" />
+                Export
+              </button>
+              {downloadMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-20" onClick={() => setDownloadMenuOpen(false)} />
+                  <div className="absolute right-0 top-10 z-30 w-48 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <p className="px-3.5 pb-1 pt-1.5 text-[11px] text-gray-400">{exportScope}</p>
+                    <button
+                      onClick={() => handleDownload(false)}
+                      className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
+                    >
+                      <i className="fa-solid fa-file-excel mr-2 text-xs" />
+                      Export
+                      <span className="ml-1.5 text-[11px] text-gray-400">컨테이너별</span>
+                    </button>
+                    <button
+                      onClick={() => handleDownload(true)}
+                      className="block w-full px-3.5 py-2 text-left text-sm text-gray-600 hover:bg-[#fff5f5] hover:text-[#ff4b4b]"
+                    >
+                      <i className="fa-solid fa-list mr-2 text-xs" />
+                      Export Detail
+                      <span className="ml-1.5 text-[11px] text-gray-400">SKU별</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
             <div className="relative">
               <button onClick={() => setUploadMenuOpen((open) => !open)} className={toolbarBtnCls}>
                 <i className="fa-solid fa-upload text-xs" />
-                엑셀 업로드
+                Import
               </button>
               {uploadMenuOpen && (
                 <>
@@ -1185,6 +1233,8 @@ export default function InvoiceTable({
           {lastSave.size}개 항목 변경 (노란 칸에 마우스를 올리면 기존 값이 보이고, 행 끝의 이력 버튼으로 전체 이력을 볼 수 있습니다)
         </p>
       )}
+
+      {sortedRows && <SettlementSummary rows={sortedRows} sections={sections} valueOf={getEffectiveValue} />}
 
       {error && <p className="px-5 py-3 text-sm text-[#ff4b4b]">{error}</p>}
 
@@ -1301,7 +1351,7 @@ export default function InvoiceTable({
                     className={`${thSum} ${c.align === "right" ? "text-right" : ""}`}
                     style={{ ...thBorder, top: SUM_ROW_TOP, ...frozen(c.key, "", 20).style }}
                   >
-                    {c.align === "right" && c.format !== "date" ? formatCell(c, sumColumn(c)) : ""}
+                    {c.align === "right" && c.format !== "date" && c.skuField !== "cbm" ? formatCell(c, sumColumn(c)) : ""}
                   </th>
                 ))}
                 <th className={thSum} style={{ ...thBorder, top: SUM_ROW_TOP }} />

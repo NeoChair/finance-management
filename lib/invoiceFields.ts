@@ -32,13 +32,14 @@ export const PARTY_FIELD_COLUMNS: Record<PartyField, string> = {
   payDe: "PAY_DE",
 };
 
-export type SkuField = "skuCd" | "qty" | "unitPrc" | "amt";
+export type SkuField = "skuCd" | "qty" | "unitPrc" | "amt" | "cbm";
 
 export const SKU_FIELD_COLUMNS: Record<SkuField, string> = {
   skuCd: "SKU_CD",
   qty: "QTY",
   unitPrc: "UNIT_PRC",
   amt: "AMT",
+  cbm: "CBM",
 };
 
 /** Change-log target tables (TB_SHPM_CHG_LOG.TRGT_TBL). */

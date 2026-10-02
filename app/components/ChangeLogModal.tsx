@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { InvoiceColumn, InvoiceSection } from "@/lib/invoiceColumns";
 import { logTargetOf, type ChangeLogEntry } from "@/lib/invoiceFields";
 
-const SKU_LABELS: Record<string, string> = { SKU_CD: "SKU 코드", QTY: "SKU QTY", AMT: "SKU Amount", UNIT_PRC: "SKU 단가" };
+const SKU_LABELS: Record<string, string> = { SKU_CD: "SKU 코드", QTY: "SKU QTY", AMT: "SKU Amount", UNIT_PRC: "SKU 단가", CBM: "SKU CBM" };
 
 function targetId(tbl: string, key: string, col: string) {
   return `${tbl}|${key}|${col}`;
